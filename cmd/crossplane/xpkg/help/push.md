@@ -7,11 +7,26 @@ By default the command looks in the current directory for a single `.xpkg` file
 to push. To push multiple files (for example, a multi-platform package) or a
 specific `.xpkg` file, use `-f` (`--package-files`).
 
-> **Important:** The destination must be fully qualified, including the
-> registry, repository, and tag (for example,
-> registry.example.com/package:v1.0.0).
+## Destination tag
+
+Specify the destination as a positional argument. The destination must be fully
+qualified, including the registry, repository, and tag (for example,
+`registry.example.com/package:v1.0.0`).
+
+If no destination is provided, the command reads the tag embedded in the package
+file. Use `xpkg build --tag` to embed a tag when building.
+
+When pushing multiple package files without a destination argument, all packages
+must have the same embedded tag.
 
 ## Examples
+
+Push a package to its embedded tag destination:
+
+```shell
+crossplane xpkg build --tag=xpkg.crossplane.io/crossplane/my-config:v1.0.0
+crossplane xpkg push -f my-config-*.xpkg
+```
 
 Push a multi-platform package:
 

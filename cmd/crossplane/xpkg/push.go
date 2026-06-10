@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -49,20 +50,24 @@ const (
 	errFindPackageinWd = "failed to find a package in current working directory"
 	errAnnotateLayers  = "failed to propagate xpkg annotations from OCI image config file to image layers"
 
-	errFmtNewTag        = "failed to parse package tag %q"
-	errFmtReadPackage   = "failed to read package file %s"
-	errFmtPushPackage   = "failed to push package file %s"
-	errFmtGetDigest     = "failed to get digest of package file %s"
-	errFmtNewDigest     = "failed to parse digest %q for package file %s"
-	errFmtGetMediaType  = "failed to get media type of package file %s"
-	errFmtGetConfigFile = "failed to get OCI config file of package file %s"
-	errFmtWriteIndex    = "failed to push an OCI image index of %d packages"
+	errFmtNewTag           = "failed to parse package tag %q"
+	errFmtReadPackage      = "failed to read package file %s"
+	errFmtPushPackage      = "failed to push package file %s"
+	errFmtGetDigest        = "failed to get digest of package file %s"
+	errFmtNewDigest        = "failed to parse digest %q for package file %s"
+	errFmtGetMediaType     = "failed to get media type of package file %s"
+	errFmtGetConfigFile    = "failed to get OCI config file of package file %s"
+	errFmtWriteIndex       = "failed to push an OCI image index of %d packages"
+	errFmtLoadManifest     = "failed to load manifest from package file %s"
+	errFmtNoRepoTag        = "package file %s has no embedded tag; specify a destination tag as an argument"
+	errFmtRepoTagMismatch  = "package files have different embedded tags: %q and %q; specify a destination tag as an argument"
+	errFmtParseEmbeddedTag = "failed to parse embedded tag %q from package file %s"
 )
 
 // pushCmd pushes a package.
 type pushCmd struct {
 	// Arguments.
-	Package string `arg:"" help:"Where to push the package. Must be a fully qualified OCI tag, including the registry, repository, and tag." placeholder:"REGISTRY/REPOSITORY:TAG"`
+	Package string `arg:"" help:"Where to push the package. Must be a fully qualified OCI tag, including the registry, repository, and tag. If not provided, the tag embedded in the package file will be used." optional:"" placeholder:"REGISTRY/REPOSITORY:TAG"`
 
 	// Flags. Keep sorted alphabetically.
 	InsecureSkipTLSVerify bool     `help:"[INSECURE] Skip verifying TLS certificates."`
@@ -114,6 +119,17 @@ func (c *pushCmd) Run(logger logging.Logger) error {
 		images = append(images, packageImage{Image: img, Path: cleanPath})
 	}
 
+	// If no destination tag was provided, try to read it from the package files.
+	destTag := c.Package
+	if destTag == "" {
+		tag, err := getEmbeddedTag(c.PackageFiles)
+		if err != nil {
+			return err
+		}
+		destTag = tag
+		logger.Debug("Using embedded tag from package", "tag", destTag)
+	}
+
 	t := http.DefaultTransport.(*http.Transport).Clone() //nolint:forcetypeassert // http.DefaultTransport is always *http.Transport
 	if c.InsecureSkipTLSVerify {
 		t.TLSClientConfig = &tls.Config{
@@ -126,7 +142,7 @@ func (c *pushCmd) Run(logger logging.Logger) error {
 		remote.WithTransport(t),
 	}
 
-	return pushImages(logger, images, c.Package, options...)
+	return pushImages(logger, images, destTag, options...)
 }
 
 // packageImage describes a package image that will be pushed.
@@ -237,4 +253,53 @@ func pushImages(logger logging.Logger, images []packageImage, url string, option
 	logger.Debug("Wrote OCI index", "ref", tag.String(), "manifests", len(adds))
 
 	return nil
+}
+
+// getEmbeddedTag reads the RepoTag from package files. If multiple files are
+// provided, they must all have the same tag (with just the tag portion matching,
+// repository must be the same). Returns an error if no tag is found or if tags
+// don't match.
+func getEmbeddedTag(packageFiles []string) (string, error) {
+	var resultTag string
+
+	for _, p := range packageFiles {
+		cleanPath := filepath.Clean(p)
+
+		opener := func() (tarball.Opener, error) {
+			return func() (io.ReadCloser, error) {
+				return os.Open(cleanPath)
+			}, nil
+		}
+
+		o, err := opener()
+		if err != nil {
+			return "", errors.Wrapf(err, errFmtLoadManifest, cleanPath)
+		}
+
+		mfst, err := tarball.LoadManifest(o)
+		if err != nil {
+			return "", errors.Wrapf(err, errFmtLoadManifest, cleanPath)
+		}
+
+		if len(mfst) == 0 || len(mfst[0].RepoTags) == 0 {
+			return "", errors.Errorf(errFmtNoRepoTag, cleanPath)
+		}
+
+		tagStr := mfst[0].RepoTags[0]
+
+		// Validate the tag is parseable.
+		if _, err := name.NewTag(tagStr); err != nil {
+			return "", errors.Wrapf(err, errFmtParseEmbeddedTag, tagStr, cleanPath)
+		}
+
+		if resultTag == "" {
+			resultTag = tagStr
+		} else if resultTag != tagStr {
+			// For multi-arch packages, we expect all packages to have the same
+			// destination tag. If they differ, the user needs to specify one.
+			return "", errors.Errorf(errFmtRepoTagMismatch, resultTag, tagStr)
+		}
+	}
+
+	return resultTag, nil
 }
