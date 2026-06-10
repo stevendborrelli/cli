@@ -50,7 +50,7 @@ const (
 	errPullRuntimeImage        = "failed to pull runtime image"
 	errLoadRuntimeTarball      = "failed to load runtime tarball"
 	errGetRuntimeBaseImageOpts = "failed to get runtime base image options"
-	errParseTag                = "failed to parse image tag"
+	errParseTag                = "invalid tag format; tag must be a fully qualified OCI reference (e.g., registry.example.com/org/package:v1.0.0)"
 )
 
 // AfterApply constructs and binds context to any subcommands
