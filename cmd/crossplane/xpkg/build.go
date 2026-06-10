@@ -50,6 +50,7 @@ const (
 	errPullRuntimeImage        = "failed to pull runtime image"
 	errLoadRuntimeTarball      = "failed to load runtime tarball"
 	errGetRuntimeBaseImageOpts = "failed to get runtime base image options"
+	errParseTag                = "failed to parse image tag"
 )
 
 // AfterApply constructs and binds context to any subcommands
@@ -105,6 +106,7 @@ type buildCmd struct {
 	Ignore                   []string `help:"comma-separated list of globs specifying files to exclude from the build, relative to --package-root." placeholder:"PATH"`
 	PackageFile              string   `help:"The file to write the package to. Defaults to a generated filename in --package-root."                 placeholder:"PATH"                                                     predictor:"xpkg_file" short:"o"           type:"path"`
 	PackageRoot              string   `default:"."                                                                                                  help:"The directory that contains the package's crossplane.yaml file." predictor:"directory" short:"f"           type:"existingdir"`
+	Tag                      string   `help:"OCI image tag to embed in the package (e.g., registry.io/org/pkg:v1.0.0)."                            placeholder:"TAG"                                                      short:"t"`
 
 	// Internal state. These aren't part of the user-exposed CLI structure.
 	fs      afero.Fs
@@ -192,7 +194,15 @@ func (c *buildCmd) Run(logger logging.Logger) error {
 
 	defer func() { _ = f.Close() }()
 
-	if err := tarball.Write(nil, img, f); err != nil {
+	var ref name.Reference
+	if c.Tag != "" {
+		ref, err = name.NewTag(c.Tag)
+		if err != nil {
+			return errors.Wrap(err, errParseTag)
+		}
+	}
+
+	if err := tarball.Write(ref, img, f); err != nil {
 		return err
 	}
 

@@ -48,6 +48,16 @@ packages don't have a runtime image.
 Use `--embed-runtime-image-tarball` to embed a local OCI image tarball instead
 of an image from the Docker cache.
 
+## Embed an image tag
+
+Use `--tag` (`-t`) to embed an OCI image tag (RepoTag) in the package. This is
+useful when using external tools to push the package that expect the tag to be
+present in the tarball manifest.
+
+```shell
+crossplane xpkg build --tag=registry.example.com/my-org/my-package:v1.0.0
+```
+
 ## Examples
 
 Build a package from the files in the 'package' directory:
@@ -61,4 +71,10 @@ also run the provider.
 
 ```shell
 crossplane xpkg build --embed-runtime-image=cc873e13cdc1
+```
+
+Build a package with an embedded image tag:
+
+```shell
+crossplane xpkg build --tag=xpkg.upbound.io/my-org/my-config:v1.2.3
 ```
