@@ -1,8 +1,9 @@
 # Testing the combined PR branch
 
-This branch exists only for testing. It merges four open PRs against
-`crossplane/cli` so they can be exercised together. **Do not open a PR from
-it** — each change is reviewable on its own.
+This branch exists only for testing. It merges the open PRs against
+`crossplane/cli` so they can be exercised together, on top of whatever has
+already merged. **Do not open a PR from it** — each change is reviewable on its
+own.
 
 It is rebuilt by hand whenever one of the PRs changes, so it may lag. Check the
 merge commits against the PRs below before trusting a result.
@@ -64,8 +65,8 @@ second. If a second build still takes tens of seconds in that phase, that is a
 bug worth reporting. The cache lives under `crossplane/base-images` in your
 user cache directory; delete it to re-test cold. Nothing prunes it yet.
 
-**#302, `--no-default-mrap`.** Verify it rather than assuming, because a
-successful build says nothing about whether the flag worked:
+**`--no-default-mrap` (#302, now in `main`).** Verify it rather than assuming,
+because a successful build says nothing about whether the flag worked:
 
 ```shell
 kubectl get managedresourceactivationpolicy   # expect none
@@ -79,6 +80,14 @@ project stop` first or you will get a misleading result.
 `npm test`, and `npm run lint` with no edits. `docs/typescript-testing-guide.md`
 walks through a full project, and its code samples are checked against the
 generated models.
+
+## Already merged
+
+These landed upstream on 2026-08-30 and now reach you through `main`:
+
+- [#302](https://github.com/crossplane/cli/pull/302) — `--[no-]default-mrap`
+- [#303](https://github.com/crossplane/cli/pull/303) — errors propagate when
+  probing for generated schemas, rather than being read as "no schemas"
 
 ## Known rough edges
 
