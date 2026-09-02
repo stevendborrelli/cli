@@ -46,6 +46,16 @@ import (
 const (
 	// typescriptBuildImage is the image in which we build the function.
 	typescriptBuildImage = "docker.io/library/node:24.20.0-slim"
+	// typescriptCompilerVersion is the TypeScript version a function is
+	// compiled with. Keep it in step with the version the function template
+	// scaffolds; see typescriptBuildScript for why it is installed separately
+	// from the function's own dependencies.
+	typescriptCompilerVersion = "7.0.2"
+	// sharedFunctionPath is where the build script stages the function tree when
+	// it is the same for every architecture. Its basename becomes the image's
+	// working directory, so it differs from the per-architecture layout — see
+	// configureTypescriptImage.
+	sharedFunctionPath = "/fn_shared"
 	// typescriptRuntimeImage is the distroless base used at runtime. The
 	// :nonroot variant, so the built function does not serve gRPC as root.
 	typescriptRuntimeImage = "gcr.io/distroless/nodejs24-debian13:nonroot"
@@ -56,50 +66,81 @@ const (
 	// empty if the project has none. ARCHS is the space-separated list of
 	// target architectures, in npm's naming (see npmArchitecture).
 	typescriptBuildScript = `set -eu
-# First, install dependencies for the schemas package so TypeScript can resolve
-# the base types.
+# Put the TypeScript compiler on PATH before installing anything else.
+#
+# TypeScript 7 ships as a per-platform package holding a statically linked
+# binary plus the bundled lib declarations, and nothing else, so it installs in
+# about a second and pulls no dependency tree. Installing it separately is what
+# lets the function tree below be installed --omit=dev: the build used to need a
+# project's devDependencies present purely so that tsc existed, and then
+# reinstalled without them to get a tree fit to ship.
+#
+# The binary resolves its bundled lib.d.ts relative to its own location and
+# panics if moved, so it stays where npm put it and a wrapper goes on PATH.
+# A wrapper rather than a direct call means the project's own "build" script
+# still runs, whatever that script does.
+mkdir -p /tsc
+npm install --no-save --no-fund --prefix /tsc "@typescript/typescript-linux-$(node -p 'process.arch')@$TSC_VERSION"
+TSC_BIN=$(find /tsc -path '*/lib/tsc' -type f | head -1)
+printf '#!/bin/sh\nexec %s "$@"\n' "$TSC_BIN" > /usr/local/bin/tsc
+chmod +x /usr/local/bin/tsc
+
+# Install dependencies for the schemas package so TypeScript can resolve the
+# base types.
 if [ -n "$SCHEMAS_PATH" ] && [ -d "$SCHEMAS_PATH" ] && [ -f "$SCHEMAS_PATH/package.json" ]; then
     cd "$SCHEMAS_PATH" && npm install --no-fund
     cd -
 fi
-# Install and compile using the build container's own architecture. The
-# TypeScript 7 compiler ships as a per-platform native binary, so it can only
-# run if node_modules matches the architecture we're running on.
-#
-# This tree is throwaway: it exists only to run the compiler, and nothing from
-# it ships. We therefore install it with --legacy-peer-deps, so that a function
-# whose devDependencies carry an unsatisfiable peer range still builds. That is
-# routine today — the lint and test tooling most TypeScript projects reach for
-# still caps its typescript peer below 7. The runtime install below stays
-# strict, because that tree is the one that ends up in the image.
-npm install --no-fund --legacy-peer-deps
+
+# One install, serving both the compile and the image. --omit=dev keeps
+# build-only packages out of both, and out of the manifest that ships.
+npm install --omit=dev --no-fund
 npm run build
-# Compilation is done, so drop the devDependencies from package.json entirely.
-# --omit=dev alone is not enough: npm still resolves devDependencies when it
-# builds the ideal tree, so a build-only package with an unsatisfiable peer
-# range would fail the runtime install even though it is never installed.
-# Removing them also means the package.json that ships in the image describes
-# only what the image actually contains.
 node -e 'const f="package.json",p=require("./"+f);delete p.devDependencies;require("fs").writeFileSync(f,JSON.stringify(p,null,2)+"\n")'
 
-# Reinstall the runtime dependencies once per target architecture. We reinstall
-# in place rather than into /fn_$arch so that file: dependencies (like
-# crossplane-models) keep resolving relative to the function directory.
+# Decide whether the tree has to be built once per architecture at all.
 #
-# --omit=dev drops the build-only dependencies, most importantly the native
-# TypeScript compiler, which would otherwise ship in every image. --cpu/--os
-# select the right prebuilt artifacts for packages that publish one per
-# platform. Note that they only steer optional-dependency selection: they do
-# not cross-compile node-gyp source builds, so a dependency that compiles from
-# source still produces build-host output.
-for arch in $ARCHS ; do
-  rm -rf node_modules
-  npm install --omit=dev --no-fund --cpu=$arch --os=linux
+# The per-architecture installs exist so that packages shipping per-platform
+# binaries resolve for the target rather than for the build host. A tree where
+# no such package ships has nothing to resolve differently, and installing it
+# twice produces byte-identical output. The lockfile records cpu and os, so it
+# answers the question without walking thousands of files.
+#
+# Only packages that reach the runtime tree count. Build-only packages are
+# excluded because they are not installed here at all — and they are the common
+# case: a project using vitest pulls in 47 per-platform @rolldown/binding
+# entries, every one of them dev-only. Counting those would force
+# per-architecture installs for almost every project while changing nothing
+# about what ships. devOptional entries are reachable either way, so they count.
+#
+# A project with no lockfile is treated as needing per-architecture installs.
+NEEDS_PER_ARCH=yes
+if [ -f package-lock.json ]; then
+  NEEDS_PER_ARCH=$(node -e 'const l=require("./package-lock.json");process.stdout.write(Object.values(l.packages||{}).some(p=>(p.cpu||p.os)&&!p.dev)?"yes":"no")')
+fi
+
+# When the tree is architecture-independent, stage it once. Copying it per
+# architecture would make the CLI stream an identical tree out of the container
+# for each one, which is the largest remaining cost of a build.
+if [ "$NEEDS_PER_ARCH" = no ]; then
+  set -- shared
+else
+  set -- $ARCHS
+fi
+
+for arch in "$@" ; do
+  if [ "$NEEDS_PER_ARCH" = yes ]; then
+    rm -rf node_modules
+    # --cpu/--os select the right prebuilt artifacts for packages that publish
+    # one per platform. They only steer optional-dependency selection: they do
+    # not cross-compile node-gyp source builds, so a dependency that compiles
+    # from source still produces build-host output.
+    npm install --omit=dev --no-fund --cpu=$arch --os=linux
+  fi
   mkdir -p /fn_$arch
   # Ship only what the function needs in order to run: the compiled output, the
   # runtime dependencies, and a package.json — Node needs its "type": "module"
-  # to load dist/ as ESM. Everything else in the build tree (src/, the tsconfigs,
-  # the eslint config, the README, the lockfile) has no runtime purpose.
+  # to load dist/ as ESM.
   #
   # -L dereferences symlinks so file: dependencies (like crossplane-models) are
   # copied as real files rather than links that will not resolve at runtime.
@@ -107,8 +148,8 @@ for arch in $ARCHS ; do
   cp -r dist /fn_$arch/
   # Drop file: dependencies from the manifest that ships. Those packages are
   # vendored into node_modules above, but the paths they came from do not exist
-  # inside the image, so declaring them would make any npm install or npm ci
-  # run there fail on a package it cannot resolve.
+  # inside the image, so declaring them would make any npm install or npm ci run
+  # there fail on a package it cannot resolve.
   node -e 'const p=require("./package.json");const d=p.dependencies||{};for(const k of Object.keys(d))if(String(d[k]).startsWith("file:"))delete d[k];process.stdout.write(JSON.stringify(p,null,2)+"\n")' > /fn_$arch/package.json
 done
 `
@@ -150,7 +191,7 @@ func (b *typescriptBuilder) Build(ctx context.Context, c BuildContext) ([]v1.Ima
 		return nil, errors.Wrap(err, "cannot build the TypeScript function because Docker is unavailable; start or install Docker, then retry")
 	}
 
-	functionTars, err := b.buildFunction(ctx, c)
+	functionTars, sharedWorkDir, err := b.buildFunction(ctx, c)
 	if err != nil {
 		return nil, err
 	}
@@ -190,7 +231,7 @@ func (b *typescriptBuilder) Build(ctx context.Context, c BuildContext) ([]v1.Ima
 				return errors.Wrap(err, "failed to append function layer")
 			}
 
-			img, err = configureTypescriptImage(img, arch)
+			img, err = configureTypescriptImage(img, arch, sharedWorkDir)
 			if err != nil {
 				return errors.Wrap(err, "failed to configure typescript image")
 			}
@@ -215,13 +256,13 @@ func (b *typescriptBuilder) Build(ctx context.Context, c BuildContext) ([]v1.Ima
 // binaries resolve correctly; see typescriptBuildScript.
 //
 //nolint:contextcheck // The defer uses context.Background() intentionally for cleanup.
-func (b *typescriptBuilder) buildFunction(ctx context.Context, c BuildContext) (map[string][]byte, error) {
+func (b *typescriptBuilder) buildFunction(ctx context.Context, c BuildContext) (map[string][]byte, string, error) {
 	fnFS := c.FunctionFS()
 	// Exclude node_modules the user might have created locally.
 	// Use the function path as the tar prefix so files end up at /<FunctionPath> in the container.
 	fnTar, err := filesystem.FSToTar(fnFS, c.FunctionPath, filesystem.WithExcludePrefix("node_modules"))
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to tar function source")
+		return nil, "", errors.Wrap(err, "failed to tar function source")
 	}
 
 	// Check if TypeScript schemas exist and tar them if so.
@@ -231,20 +272,20 @@ func (b *typescriptBuilder) buildFunction(ctx context.Context, c BuildContext) (
 	tsSchemasFS := afero.NewBasePathFs(c.ProjectFS, tsSchemasRel)
 	hasTSSchemas, err := afero.DirExists(tsSchemasFS, ".")
 	if err != nil {
-		return nil, errors.Wrapf(err, "cannot check for TypeScript schemas at %q", tsSchemasRel)
+		return nil, "", errors.Wrapf(err, "cannot check for TypeScript schemas at %q", tsSchemasRel)
 	}
 	var schemasTar []byte
 	if hasTSSchemas {
 		schemasTar, err = filesystem.FSToTar(tsSchemasFS, tsSchemasRel)
 		if err != nil {
-			return nil, errors.Wrap(err, "failed to tar typescript schemas")
+			return nil, "", errors.Wrap(err, "failed to tar typescript schemas")
 		}
 	}
 
 	buildImage := b.buildImage
 	_, rewritten, err := b.configStore.RewritePath(ctx, b.buildImage)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to rewrite build image")
+		return nil, "", errors.Wrap(err, "failed to rewrite build image")
 	}
 	if rewritten != "" {
 		buildImage = rewritten
@@ -262,7 +303,7 @@ func (b *typescriptBuilder) buildFunction(ctx context.Context, c BuildContext) (
 	for i, a := range c.Architectures {
 		npmArchitectures[i], err = npmArchitecture(a)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 	}
 
@@ -271,6 +312,7 @@ func (b *typescriptBuilder) buildFunction(ctx context.Context, c BuildContext) (
 		docker.StartWithEnv(
 			"ARCHS="+strings.Join(npmArchitectures, " "),
 			"SCHEMAS_PATH="+tsSchemasPath,
+			"TSC_VERSION="+typescriptCompilerVersion,
 		),
 		docker.StartWithCommand([]string{"sh", "-c", typescriptBuildScript}),
 		docker.StartWithWorkingDirectory(fnPath),
@@ -281,7 +323,7 @@ func (b *typescriptBuilder) buildFunction(ctx context.Context, c BuildContext) (
 
 	cid, err := docker.StartContainer(ctx, "", buildImage, opts...)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to start typescript build container")
+		return nil, "", errors.Wrap(err, "failed to start typescript build container")
 	}
 	defer func() {
 		// Use context.Background() so container cleanup happens even if ctx is cancelled.
@@ -289,7 +331,20 @@ func (b *typescriptBuilder) buildFunction(ctx context.Context, c BuildContext) (
 	}()
 
 	if err := docker.WaitForContainerByID(ctx, cid); err != nil {
-		return nil, errors.Wrap(err, "typescript build container failed")
+		return nil, "", errors.Wrap(err, "typescript build container failed")
+	}
+
+	// The script stages a single /fn_shared tree when nothing in the runtime
+	// dependencies ships per-platform binaries, because every architecture would
+	// otherwise get an identical copy. Streaming one tree instead of one per
+	// architecture is worth more than the installs it also saves: each is around
+	// 90MB for a project of any size.
+	if shared, err := docker.TarFromContainer(ctx, cid, sharedFunctionPath); err == nil {
+		ret := make(map[string][]byte, len(c.Architectures))
+		for _, arch := range c.Architectures {
+			ret[arch] = shared
+		}
+		return ret, sharedFunctionPath, nil
 	}
 
 	ret := make(map[string][]byte, len(c.Architectures))
@@ -297,11 +352,11 @@ func (b *typescriptBuilder) buildFunction(ctx context.Context, c BuildContext) (
 		npmArch, _ := npmArchitecture(arch) // Ignore the error since we already did this once.
 		ret[arch], err = docker.TarFromContainer(ctx, cid, fmt.Sprintf("/fn_%s", npmArch))
 		if err != nil {
-			return nil, errors.Wrapf(err, "failed to retrieve built function for architecture %s", arch)
+			return nil, "", errors.Wrapf(err, "failed to retrieve built function for architecture %s", arch)
 		}
 	}
 
-	return ret, nil
+	return ret, "", nil
 }
 
 // npmArchitecture maps an OCI architecture to the name npm expects for its
@@ -321,7 +376,10 @@ func npmArchitecture(a string) (string, error) {
 // the user, the function entrypoint and the gRPC port. The working directory is
 // the architecture's own /fn_<arch> tree, so that Node resolves the node_modules
 // built for this architecture.
-func configureTypescriptImage(img v1.Image, arch string) (v1.Image, error) {
+// configureTypescriptImage sets the image's user, entrypoint, working
+// directory and port. workDir overrides the per-architecture working directory
+// when the build staged one tree for every architecture; it is empty otherwise.
+func configureTypescriptImage(img v1.Image, arch, workDir string) (v1.Image, error) {
 	cfgFile, err := img.ConfigFile()
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to get config file")
@@ -335,6 +393,9 @@ func configureTypescriptImage(img v1.Image, arch string) (v1.Image, error) {
 	cfg.Entrypoint = []string{"/nodejs/bin/node", "dist/main.js"}
 	cfg.Cmd = nil
 	cfg.WorkingDir = fmt.Sprintf("/fn_%s", npmArch)
+	if workDir != "" {
+		cfg.WorkingDir = workDir
+	}
 	// Set explicitly as well as selecting the :nonroot base, so an image
 	// rewritten through spec.imageConfigs cannot quietly reintroduce root.
 	// Matches the python builder.
