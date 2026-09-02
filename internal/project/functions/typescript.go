@@ -46,10 +46,10 @@ import (
 const (
 	// typescriptBuildImage is the image in which we build the function.
 	typescriptBuildImage = "docker.io/library/node:24.20.0-slim"
-	// typescriptCompilerVersion is the TypeScript version a function is
-	// compiled with. Keep it in step with the version the function template
-	// scaffolds; see typescriptBuildScript for why it is installed separately
-	// from the function's own dependencies.
+	// typescriptCompilerVersion is the TypeScript version used when a function
+	// declares none of its own. A function that does declare one is compiled
+	// with that instead; see typescriptBuildScript. Keep it in step with the
+	// version the function template scaffolds.
 	typescriptCompilerVersion = "7.0.2"
 	// sharedFunctionPath is where the build script stages the function tree when
 	// it is the same for every architecture. Its basename becomes the image's
@@ -79,8 +79,35 @@ const (
 # panics if moved, so it stays where npm put it and a wrapper goes on PATH.
 # A wrapper rather than a direct call means the project's own "build" script
 # still runs, whatever that script does.
+#
+# The version comes from the project, so a function is compiled with the
+# compiler it asks for rather than one the CLI chose. TypeScript 7 is normally
+# declared as an npm alias, npm:typescript@<range>, because the plain
+# "typescript" name is taken by the 6.x compiler that typescript-eslint needs,
+# so the alias is what to look for. A plain "typescript" entry that is not an
+# alias is used as-is. Failing both, the CLI's own pinned version applies.
+#
+# The per-platform packages are versioned in lockstep with typescript itself, so
+# whatever range the project declares resolves the same way here.
+TSC_SPEC=$(node -e '
+const p = require("./package.json");
+const deps = { ...(p.dependencies || {}), ...(p.devDependencies || {}) };
+let spec = "";
+for (const v of Object.values(deps)) {
+  const m = /^npm:typescript@(.+)$/.exec(String(v));
+  if (m) { spec = m[1]; break; }
+}
+if (!spec && deps.typescript && !String(deps.typescript).startsWith("npm:")) {
+  spec = String(deps.typescript);
+}
+process.stdout.write(spec);
+')
+if [ -z "$TSC_SPEC" ]; then
+  TSC_SPEC=$TSC_VERSION
+  echo "no typescript dependency found; compiling with $TSC_SPEC"
+fi
 mkdir -p /tsc
-npm install --no-save --no-fund --prefix /tsc "@typescript/typescript-linux-$(node -p 'process.arch')@$TSC_VERSION"
+npm install --no-save --no-fund --prefix /tsc "@typescript/typescript-linux-$(node -p 'process.arch')@$TSC_SPEC"
 TSC_BIN=$(find /tsc -path '*/lib/tsc' -type f | head -1)
 printf '#!/bin/sh\nexec %s "$@"\n' "$TSC_BIN" > /usr/local/bin/tsc
 chmod +x /usr/local/bin/tsc
