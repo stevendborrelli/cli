@@ -71,6 +71,23 @@ func (r *Resolver) Resolve(ctx context.Context, ref string) (name.Reference, str
 		return nil, "", errors.Wrapf(err, "ref %s has an invalid repository", ref)
 	}
 
+	// An exact version needs no tag listing: the only tag that can satisfy it
+	// is itself. Listing otherwise costs a registry round trip for every
+	// dependency on every build, even when the package is already cached, and
+	// transitive dependencies are pinned exactly in package metadata — so this
+	// is the common case rather than an edge one.
+	//
+	// This has to be checked before NewConstraint rather than left to its error
+	// path, because Masterminds accepts a bare version as a constraint:
+	// "v1.2.3" parses as "=1.2.3" and so took the listing path.
+	if isExactVersionTag(tagOrConstraint) {
+		tag, err := name.NewTag(ref, name.StrictValidation)
+		if err != nil {
+			return nil, "", errors.Wrapf(err, "invalid ref %s", ref)
+		}
+		return tag, tag.TagStr(), nil
+	}
+
 	sc, err := semver.NewConstraint(tagOrConstraint)
 	if err != nil {
 		// Not a constraint - treat as an opaque tag.
@@ -95,6 +112,22 @@ func (r *Resolver) Resolve(ctx context.Context, ref string) (name.Reference, str
 
 // highestSatisfying returns the original-form string of the highest
 // version in tags that satisfies c, or "" if none matches.
+// isExactVersionTag reports whether tag names one exact semantic version.
+// Resolving such a tag against the registry cannot select anything else, so the
+// listing can be skipped.
+//
+// The parsed version has to render back to the tag, allowing the leading "v"
+// that OCI tags conventionally carry. That keeps partial and wildcard versions
+// on the listing path: "1.0" parses as 1.0.0 but names a different tag, and
+// "1.x" or ">=1.0.0" do not parse as a version at all.
+func isExactVersionTag(tag string) bool {
+	v, err := semver.NewVersion(tag)
+	if err != nil {
+		return false
+	}
+	return tag == v.String() || tag == "v"+v.String()
+}
+
 func highestSatisfying(tags []string, c *semver.Constraints) string {
 	vs := make(semver.Collection, 0, len(tags))
 	for _, t := range tags {

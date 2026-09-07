@@ -32,6 +32,8 @@ import (
 type fakeClient struct {
 	tags    []string
 	listErr error
+
+	listCalls int
 }
 
 func (f *fakeClient) Get(_ context.Context, _ string, _ ...xpkg.GetOption) (*xpkg.Package, error) {
@@ -39,6 +41,7 @@ func (f *fakeClient) Get(_ context.Context, _ string, _ ...xpkg.GetOption) (*xpk
 }
 
 func (f *fakeClient) ListVersions(_ context.Context, _ string, _ ...xpkg.GetOption) ([]string, error) {
+	f.listCalls++
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
@@ -145,6 +148,91 @@ func TestResolver_Resolve(t *testing.T) {
 			}
 			if diff := cmp.Diff(tc.want.version, gotVer); diff != "" {
 				t.Errorf("Resolve(...), -want verfsion +got versfion:\n%s", diff)
+			}
+		})
+	}
+}
+
+// An exact version must not cost a registry round trip. Masterminds accepts a
+// bare version as a constraint, so before this was special-cased every exactly
+// pinned reference listed the repository's tags to rediscover the version it
+// had already been given - once per dependency, on every build, cached or not.
+// Transitive dependencies are always pinned exactly, so this was the common
+// path.
+func TestResolver_ExactVersionSkipsListing(t *testing.T) {
+	t.Parallel()
+
+	tags := []string{"v1.0.0", "v1.1.0", "v2.0.0", "latest"}
+
+	tests := map[string]struct {
+		ref string
+
+		wantRef       string
+		wantVersion   string
+		wantListCalls int
+	}{
+		"ExactWithVPrefix": {
+			ref:           "pkg.example/foo:v1.0.0",
+			wantRef:       "pkg.example/foo:v1.0.0",
+			wantVersion:   "v1.0.0",
+			wantListCalls: 0,
+		},
+		"ExactWithoutVPrefix": {
+			ref:           "pkg.example/foo:1.0.0",
+			wantRef:       "pkg.example/foo:1.0.0",
+			wantVersion:   "1.0.0",
+			wantListCalls: 0,
+		},
+		"ExactPrerelease": {
+			ref:           "pkg.example/foo:v2.0.0-rc.1",
+			wantRef:       "pkg.example/foo:v2.0.0-rc.1",
+			wantVersion:   "v2.0.0-rc.1",
+			wantListCalls: 0,
+		},
+		// A version the registry does not carry still resolves: the failure
+		// surfaces when the package is fetched. Listing to pre-empt that would
+		// reintroduce the round trip for every pinned dependency.
+		"ExactButAbsentFromRegistry": {
+			ref:           "pkg.example/foo:v9.9.9",
+			wantRef:       "pkg.example/foo:v9.9.9",
+			wantVersion:   "v9.9.9",
+			wantListCalls: 0,
+		},
+		// Partial versions name a tag that is not the version they parse as, so
+		// they must keep resolving through the listing.
+		"PartialVersionStillLists": {
+			ref:           "pkg.example/foo:1.0",
+			wantRef:       "pkg.example/foo:v1.0.0",
+			wantVersion:   "v1.0.0",
+			wantListCalls: 1,
+		},
+		"RangeStillLists": {
+			ref:           "pkg.example/foo:>=v1.0.0, <v2.0.0",
+			wantRef:       "pkg.example/foo:v1.1.0",
+			wantVersion:   "v1.1.0",
+			wantListCalls: 1,
+		},
+	}
+
+	for tcName, tc := range tests {
+		t.Run(tcName, func(t *testing.T) {
+			t.Parallel()
+
+			fc := &fakeClient{tags: tags}
+			r := NewResolver(fc)
+
+			gotRef, gotVersion, err := r.Resolve(context.Background(), tc.ref)
+			if err != nil {
+				t.Fatalf("Resolve(%q): %v", tc.ref, err)
+			}
+			if got := gotRef.String(); got != tc.wantRef {
+				t.Errorf("ref = %q, want %q", got, tc.wantRef)
+			}
+			if gotVersion != tc.wantVersion {
+				t.Errorf("version = %q, want %q", gotVersion, tc.wantVersion)
+			}
+			if fc.listCalls != tc.wantListCalls {
+				t.Errorf("ListVersions called %d times, want %d", fc.listCalls, tc.wantListCalls)
 			}
 		})
 	}
