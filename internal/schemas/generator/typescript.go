@@ -17,11 +17,14 @@ limitations under the License.
 package generator
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io/fs"
+	"maps"
 	"path"
 	"path/filepath"
 	"slices"
@@ -45,16 +48,23 @@ import (
 
 const (
 	typescriptModelsFolder = "models"
-	// typescriptImage is the Docker image used to run crd-generate. Pinned to
-	// an exact tag: the toolchain is installed from a lockfile, so a floating
-	// Node would leave generated output dependent on when it was generated.
+	// typescriptImage is the Docker image used to run crd-generate and
+	// openapi-generate. Pinned to an exact tag: the toolchain is installed
+	// from a lockfile, so a floating Node would leave generated output
+	// dependent on when it was generated.
 	typescriptImage = "docker.io/library/node:24.20.0-slim"
+	// typescriptAllOpenAPIFile is the path, inside the container work tree,
+	// of the merged OpenAPI definitions document fed to openapi-generate. It
+	// must match the "openapi-generate".input entry in the pinned toolchain
+	// package.json.
+	typescriptAllOpenAPIFile = "all-openapi.json"
 )
 
-// The toolchain that turns CRDs into TypeScript models is pinned by a
-// committed package.json and package-lock.json rather than resolved at
-// generation time, so the same CLI produces the same models. Renovate keeps
-// the pair current; see the typescript-toolchain rule in renovate.json5.
+// The toolchain that turns CRDs and OpenAPI specs into TypeScript models is
+// pinned by a committed package.json and package-lock.json rather than
+// resolved at generation time, so the same CLI produces the same models.
+// Renovate keeps the pair current; see the typescript-toolchain rule in
+// renovate.json5.
 //
 //go:embed typescript-toolchain/package.json
 var typescriptToolchainPackageJSON []byte
@@ -65,7 +75,7 @@ var typescriptToolchainPackageLock []byte
 type typescriptGenerator struct{}
 
 func (typescriptGenerator) Language() string {
-	return devv1alpha1.SchemaLanguageTypescript
+	return devv1alpha1.SchemaLanguageTypeScript
 }
 
 // GenerateFromCRD generates TypeScript schema files from the XRDs and CRDs in fromFS.
@@ -92,12 +102,116 @@ func (t typescriptGenerator) GenerateFromCRD(ctx context.Context, fromFS afero.F
 	return t.generateFromCRDFiles(ctx, workFS, crdsDir, r)
 }
 
-// GenerateFromOpenAPI is not supported for TypeScript - use GenerateFromCRD instead.
-// The crd-generate tool requires CRD YAML files, not OpenAPI specs.
-func (t typescriptGenerator) GenerateFromOpenAPI(_ context.Context, _ afero.Fs, _ runner.SchemaRunner) (afero.Fs, error) {
-	// crd-generate works with CRD YAML files, not OpenAPI specs.
-	// Return nil to indicate no schemas were generated.
-	return nil, nil
+// GenerateFromOpenAPI generates TypeScript models from OpenAPI v3 documents in
+// fromFS, today produced only by the built-in Kubernetes API dependency type
+// (see k8sOpenAPISource). It uses @kubernetes-models/openapi-generate, a
+// sibling of crd-generate in the same toolchain, converted to the format that
+// tool expects; see toLegacyOpenAPIDefinitions.
+func (t typescriptGenerator) GenerateFromOpenAPI(ctx context.Context, fromFS afero.Fs, r runner.SchemaRunner) (afero.Fs, error) {
+	schemas, err := t.collectOpenAPISchemas(fromFS)
+	if err != nil {
+		return nil, err
+	}
+	if len(schemas) == 0 {
+		return nil, nil
+	}
+
+	definitions, err := toLegacyOpenAPIDefinitions(schemas)
+	if err != nil {
+		return nil, err
+	}
+
+	workFS := afero.NewMemMapFs()
+	if err := afero.WriteFile(workFS, typescriptAllOpenAPIFile, definitions, 0o644); err != nil {
+		return nil, errors.Wrap(err, "failed to write combined OpenAPI definitions file")
+	}
+
+	return t.runToolchain(ctx, workFS, r, "npx openapi-generate")
+}
+
+// openAPIDocument is the subset of an OpenAPI v3 document collectOpenAPISchemas
+// reads: the named schemas under components, which is all openapi-generate
+// consumes.
+type openAPIDocument struct {
+	Components struct {
+		Schemas map[string]json.RawMessage `json:"schemas"`
+	} `json:"components"`
+}
+
+// collectOpenAPISchemas walks fromFS and merges the components.schemas of
+// every OpenAPI v3 document it finds, keyed by schema ID (e.g.
+// "io.k8s.api.apps.v1.Deployment"). Files that aren't JSON, or don't parse as
+// an OpenAPI document, are skipped rather than treated as an error: fromFS may
+// contain other files alongside the specs.
+func (t typescriptGenerator) collectOpenAPISchemas(fromFS afero.Fs) (map[string]json.RawMessage, error) {
+	merged := map[string]json.RawMessage{}
+
+	err := afero.Walk(fromFS, "", func(path string, info fs.FileInfo, err error) error {
+		if err != nil {
+			return errors.Wrapf(err, "cannot read %q while collecting OpenAPI schemas for TypeScript models", path)
+		}
+		if info.IsDir() || filepath.Ext(path) != ".json" {
+			return nil
+		}
+
+		bs, err := afero.ReadFile(fromFS, path)
+		if err != nil {
+			return errors.Wrapf(err, "failed to read file %q", path)
+		}
+
+		var doc openAPIDocument
+		if err := json.Unmarshal(bs, &doc); err != nil {
+			return nil //nolint:nilerr // Skip files that aren't valid JSON.
+		}
+
+		maps.Copy(merged, doc.Components.Schemas)
+
+		return nil
+	})
+
+	return merged, errors.Wrap(err, "failed to walk OpenAPI filesystem")
+}
+
+// toLegacyOpenAPIDefinitions converts a merged OpenAPI v3 components.schemas
+// map into the Swagger 2 "definitions" document that @kubernetes-models/openapi-generate
+// expects.
+func toLegacyOpenAPIDefinitions(schemas map[string]json.RawMessage) ([]byte, error) {
+	for id, raw := range schemas {
+		if !strings.HasPrefix(id, "io.k8s.apimachinery.") {
+			continue
+		}
+
+		var withGVK struct {
+			GVK []json.RawMessage `json:"x-kubernetes-group-version-kind"`
+		}
+		if err := json.Unmarshal(raw, &withGVK); err != nil {
+			return nil, errors.Wrapf(err, "failed to parse schema %q", id)
+		}
+		if len(withGVK.GVK) <= 1 {
+			continue
+		}
+
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			return nil, errors.Wrapf(err, "failed to parse schema %q", id)
+		}
+		delete(fields, "x-kubernetes-group-version-kind")
+
+		fixed, err := json.Marshal(fields)
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to re-marshal schema %q", id)
+		}
+		schemas[id] = fixed
+	}
+
+	bs, err := json.Marshal(struct {
+		Definitions map[string]json.RawMessage `json:"definitions"`
+	}{Definitions: schemas})
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to marshal OpenAPI definitions for TypeScript models")
+	}
+
+	return bytes.ReplaceAll(bs, []byte(`#/components/schemas/`), []byte(`#/definitions/`)), nil
 }
 
 // collectCRDs walks the input filesystem and collects all CRD YAML files into
@@ -267,6 +381,12 @@ func (t typescriptGenerator) generateFromCRDFiles(ctx context.Context, workFS af
 		return nil, errors.Wrap(err, "failed to write combined CRD file")
 	}
 
+	return t.runToolchain(ctx, workFS, r, "npx crd-generate")
+}
+
+// runToolchain stages the pinned npm toolchain into workFS and runs
+// generatorCmd -- "npx crd-generate" or "npx openapi-generate",
+func (t typescriptGenerator) runToolchain(ctx context.Context, workFS afero.Fs, r runner.SchemaRunner, generatorCmd string) (afero.Fs, error) {
 	// Stage the pinned toolchain manifest and lockfile so the container can
 	// install with npm ci rather than resolving version ranges at runtime.
 	if err := afero.WriteFile(workFS, "package.json", typescriptToolchainPackageJSON, 0o644); err != nil {
@@ -276,28 +396,20 @@ func (t typescriptGenerator) generateFromCRDFiles(ctx context.Context, workFS af
 		return nil, errors.Wrap(err, "failed to write toolchain package-lock.json")
 	}
 
-	// Run crd-generate in a container.
+	// Run the generator in a container.
 	// The script:
 	// 1. Installs the pinned toolchain from the staged lockfile
-	// 2. Runs crd-generate to produce TypeScript source
+	// 2. Runs the generator to produce TypeScript source
 	// 3. Compiles TypeScript to JavaScript
-	if err := r.Generate(
-		ctx,
-		workFS,
-		".",
-		"",
-		typescriptImage,
-		[]string{
-			"sh", "-c",
-			`set -eu
+	script := fmt.Sprintf(`set -eu
 
 # Install the pinned toolchain. package.json and package-lock.json are staged
 # by the generator, so npm ci installs exactly the locked tree and fails if the
 # two ever disagree.
 npm ci --no-audit --no-fund
 
-# Run crd-generate (reads config from package.json)
-npx crd-generate
+# Run the generator (reads its input/output config from package.json)
+%s
 
 # Create tsconfig.json for compilation. We deliberately don't emit sourceMap or
 # declarationMap: only dist/ ships in the models package, so every map would
@@ -327,13 +439,13 @@ npx tsc
 mkdir -p models
 cp -r dist/* models/
 
-# crd-generate emits _schemas/ as pre-compiled JS (not TypeScript), so tsc does
-# not process it and it never appears in dist/. Copy it directly from gen/.
+# The generator emits _schemas/ as pre-compiled JS (not TypeScript), so tsc
+# does not process it and it never appears in dist/. Copy it directly from gen/.
 if [ -d gen/_schemas ]; then
   cp -r gen/_schemas models/
 fi
 
-# Update package.json for distribution (remove devDependencies and crd-generate config)
+# Update package.json for distribution (remove devDependencies and generator config)
 cat > models/package.json << 'DISTEOF'
 {
   "name": "crossplane-models",
@@ -357,8 +469,15 @@ cat > models/package.json << 'DISTEOF'
   }
 }
 DISTEOF
-`,
-		},
+`, generatorCmd)
+
+	if err := r.Generate(
+		ctx,
+		workFS,
+		".",
+		"",
+		typescriptImage,
+		[]string{"sh", "-c", script},
 	); err != nil {
 		return nil, errors.Wrap(err, "failed to install npm dependencies and generate TypeScript schemas; see npm output above for details")
 	}

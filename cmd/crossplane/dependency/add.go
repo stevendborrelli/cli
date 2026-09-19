@@ -18,9 +18,7 @@ package dependency
 
 import (
 	"context"
-	"fmt"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/google/go-containerregistry/pkg/name"
@@ -116,38 +114,7 @@ func (c *addCmd) Run(logger logging.Logger, sp terminal.SpinnerPrinter, cfg *con
 		return err
 	}
 
-	if note := schemaLanguageNote(dep, proj.Spec.Schemas.GetLanguages()); note != "" {
-		fmt.Println(note) //nolint:forbidigo // CLI output.
-	}
-
 	return nil
-}
-
-// schemaLanguageNote returns a note for a dependency that will not produce
-// models in one of the languages the project asked for, or "" when there is
-// nothing to say.
-//
-// A Kubernetes API dependency is described by an OpenAPI spec rather than by
-// CRDs, and the TypeScript generator reads CRDs. It produces nothing for such a
-// source and says nothing, so a user who has seen Python and Go generate
-// bindings for the Kubernetes API reasonably expects the same and finds out
-// otherwise when an import fails. This is the moment that expectation forms,
-// which is why the note lives here rather than at build time.
-//
-// Nothing is wrong: TypeScript functions get typed built-ins from the
-// kubernetes-models package, which the function scaffold already depends on, so
-// generating them would duplicate it.
-func schemaLanguageNote(dep v1alpha1.Dependency, langs []string) string {
-	if dep.Type != v1alpha1.DependencyTypeK8s {
-		return ""
-	}
-	if !slices.Contains(langs, v1alpha1.SchemaLanguageTypescript) {
-		return ""
-	}
-
-	return "Note: TypeScript models are not generated from Kubernetes API dependencies. " +
-		"Import built-in types from the kubernetes-models package instead, for example " +
-		"`import { Deployment } from 'kubernetes-models/apps/v1'`."
 }
 
 func (c *addCmd) buildDependency() (v1alpha1.Dependency, error) {

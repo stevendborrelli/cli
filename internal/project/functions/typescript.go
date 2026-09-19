@@ -156,7 +156,7 @@ func (b *typescriptBuilder) Build(ctx context.Context, c BuildContext) ([]v1.Ima
 				return errors.Wrap(err, "failed to append function layer")
 			}
 
-			img, err = configureTypescriptImage(img, arch)
+			img, err = configureTypeScriptImage(img, arch)
 			if err != nil {
 				return errors.Wrap(err, "failed to configure typescript image")
 			}
@@ -280,11 +280,11 @@ func npmArchitecture(a string) (string, error) {
 	}
 }
 
-// configureTypescriptImage sets the runtime configuration on the final image:
+// configureTypeScriptImage sets the runtime configuration on the final image:
 // the user, the function entrypoint and the gRPC port. The working directory is
 // the architecture's own /fn_<arch> tree, so that Node resolves the node_modules
 // built for this architecture.
-func configureTypescriptImage(img v1.Image, arch string) (v1.Image, error) {
+func configureTypeScriptImage(img v1.Image, arch string) (v1.Image, error) {
 	cfgFile, err := img.ConfigFile()
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to get config file")
@@ -310,7 +310,7 @@ func configureTypescriptImage(img v1.Image, arch string) (v1.Image, error) {
 	return mutate.Config(img, cfg)
 }
 
-func newTypescriptBuilder(imageConfigs []pkgv1beta1.ImageConfig) *typescriptBuilder {
+func newTypeScriptBuilder(imageConfigs []pkgv1beta1.ImageConfig) *typescriptBuilder {
 	return &typescriptBuilder{
 		buildImage:   typescriptBuildImage,
 		runtimeImage: typescriptRuntimeImage,

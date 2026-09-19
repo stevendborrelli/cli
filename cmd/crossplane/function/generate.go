@@ -196,7 +196,7 @@ func (c *generateCmd) Run(sp terminal.SpinnerPrinter, cfg *config.Config) error 
 		langGoTemplating: c.generateGoTemplatingFiles,
 		"kcl":            c.generateKCLFiles,
 		langPython:       c.generatePythonFiles,
-		"typescript":     c.generateTypescriptFiles,
+		"typescript":     c.generateTypeScriptFiles,
 	}
 
 	generator, ok := generators[c.Language]
@@ -443,7 +443,7 @@ type typescriptTemplateData struct {
 	SchemasPath string
 }
 
-func (c *generateCmd) generateTypescriptFiles(targetFS afero.Fs) error {
+func (c *generateCmd) generateTypeScriptFiles(targetFS afero.Fs) error {
 	hasSchemas, err := afero.DirExists(c.schemasFS, "typescript")
 	if err != nil {
 		return errors.Wrap(err, "cannot inspect typescript schemas directory")

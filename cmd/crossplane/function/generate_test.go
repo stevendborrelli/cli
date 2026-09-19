@@ -234,7 +234,7 @@ func TestGeneratePythonFiles(t *testing.T) {
 	}
 }
 
-func TestGenerateTypescriptFiles(t *testing.T) {
+func TestGenerateTypeScriptFiles(t *testing.T) {
 	cases := map[string]struct {
 		seedSchemas     map[string][]byte
 		wantFiles       []string
@@ -287,7 +287,7 @@ func TestGenerateTypescriptFiles(t *testing.T) {
 				proj:      testProject(),
 			}
 			fs := afero.NewMemMapFs()
-			if err := c.generateTypescriptFiles(fs); err != nil {
+			if err := c.generateTypeScriptFiles(fs); err != nil {
 				t.Fatal(err)
 			}
 			assertFiles(t, fs, tc.wantFiles)
@@ -296,12 +296,12 @@ func TestGenerateTypescriptFiles(t *testing.T) {
 	}
 }
 
-// TestGenerateTypescriptPackageJSON checks that the scaffolded manifest parses
+// TestGenerateTypeScriptPackageJSON checks that the scaffolded manifest parses
 // in both HasSchemas states. The crossplane-models entry sits inside a
 // {{- if }} block whose whitespace trimming decides whether the preceding
 // comma is still valid, so a template that emits correct JSON in one state can
 // emit a trailing comma in the other. A substring assertion would not notice.
-func TestGenerateTypescriptPackageJSON(t *testing.T) {
+func TestGenerateTypeScriptPackageJSON(t *testing.T) {
 	cases := map[string]struct {
 		seedSchemas map[string][]byte
 		wantModels  bool
@@ -318,7 +318,7 @@ func TestGenerateTypescriptPackageJSON(t *testing.T) {
 				proj:      testProject(),
 			}
 			fs := afero.NewMemMapFs()
-			if err := c.generateTypescriptFiles(fs); err != nil {
+			if err := c.generateTypeScriptFiles(fs); err != nil {
 				t.Fatal(err)
 			}
 

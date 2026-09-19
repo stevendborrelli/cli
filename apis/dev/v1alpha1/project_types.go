@@ -53,7 +53,7 @@ const (
 	SchemaLanguageJSON       = "json"
 	SchemaLanguageKCL        = "kcl"
 	SchemaLanguagePython     = "python"
-	SchemaLanguageTypescript = "typescript"
+	SchemaLanguageTypeScript = "typescript"
 )
 
 // SupportedSchemaLanguages returns the set of language identifiers accepted
@@ -64,7 +64,7 @@ func SupportedSchemaLanguages() []string {
 		SchemaLanguageJSON,
 		SchemaLanguageKCL,
 		SchemaLanguagePython,
-		SchemaLanguageTypescript,
+		SchemaLanguageTypeScript,
 	}
 }
 

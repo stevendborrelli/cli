@@ -48,11 +48,6 @@
     {
       customType: 'regex',
       description: 'Bump the container images the schema generators run in',
-      // Scoped to the generator package on purpose. The function builders in
-      // internal/project/functions also declare image constants, but those are
-      // deliberately floating bases for user function images (for example
-      // distroless nodejs24-debian13, whose tag is not a version), so bumping
-      // them automatically would be wrong.
       managerFilePatterns: [
         '/^internal/schemas/generator/.*\\.go$/',
       ],
@@ -165,10 +160,7 @@
       enabled: false,
     },
     {
-      // The TypeScript schema generator installs this tree with npm ci inside a
-      // container, so package.json and package-lock.json have to move together
-      // or the install fails. Grouping keeps them in one reviewable PR, and
-      // each bump changes generated model output, so these are worth reading.
+      // Ensure TypeScript generator package.json and package-lock.json are updated together.
       description: 'Group updates to the pinned TypeScript schema generator toolchain',
       matchManagers: [
         'npm',

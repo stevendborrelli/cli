@@ -20,10 +20,15 @@
   },
   "devDependencies": {
     "@kubernetes-models/crd-generate": "6.1.1",
+    "@kubernetes-models/openapi-generate": "6.1.1",
     "typescript": "5.9.3"
   },
   "crd-generate": {
     "input": ["./all-crds.yaml"],
+    "output": "./gen"
+  },
+  "openapi-generate": {
+    "input": ["./all-openapi.json"],
     "output": "./gen"
   }
 }
