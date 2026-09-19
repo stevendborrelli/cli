@@ -26,6 +26,9 @@ package manager
 import (
 	"context"
 	"embed"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -114,4 +117,80 @@ func TestGenerateFromMultipleSourcesTypeScriptRealToolchain(t *testing.T) {
 	if !strings.Contains(string(rootIndex), "./v1/index.js") {
 		t.Errorf("root index.js does not re-export the OpenAPI-sourced group v1:\n%s", rootIndex)
 	}
+
+	assertMergedPackageTypechecks(t, outFS, "typescript")
+}
+
+// assertMergedPackageTypechecks writes the merged package to a real
+// directory and runs the real TypeScript compiler against a consumer file
+// that imports the CRD-sourced group and the OpenAPI-sourced group through
+// the merged root barrel -- the file MergeGeneratedSchemas rebuilds. String
+// assertions on that barrel's content (above) can't tell a valid merge from
+// one whose text happens to mention the right group names; only tsc can.
+func assertMergedPackageTypechecks(t *testing.T, mergedFS afero.Fs, subPath string) {
+	t.Helper()
+
+	if _, err := exec.LookPath("npm"); err != nil {
+		t.Skip("npm not on PATH; skipping the typecheck of the merged package")
+	}
+
+	dir := t.TempDir()
+	pkgFS := afero.NewBasePathFs(mergedFS, subPath)
+	if err := afero.Walk(pkgFS, "", func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return os.MkdirAll(filepath.Join(dir, p), 0o755)
+		}
+		content, err := afero.ReadFile(pkgFS, p)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(dir, p), content, 0o644)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A consumer importing both groups only through the merged root barrel:
+	// exactly the file MergeGeneratedSchemas rebuilds, not the per-group
+	// files a plain copy would have left untouched either way.
+	consumer := `import { exampleCom, v1 } from "./index.js";
+
+new exampleCom.v1.Widget();
+new v1.Namespace();
+`
+	if err := os.WriteFile(filepath.Join(dir, "consumer.ts"), []byte(consumer), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tsconfig := `{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["consumer.ts", "index.d.ts", "*/**/*.d.ts"]
+}`
+	if err := os.WriteFile(filepath.Join(dir, "tsconfig.json"), []byte(tsconfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(name string, args ...string) {
+		t.Helper()
+		cmd := exec.Command(name, args...) //nolint:gosec // Fixed args; not user input.
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s %s failed: %v\n%s", name, strings.Join(args, " "), err, out)
+		}
+	}
+
+	run("npm", "install", "--no-audit", "--no-fund")
+	run("npm", "install", "--no-save", "--no-audit", "--no-fund", "typescript@5.9.3")
+	run("npx", "tsc", "--noEmit")
 }

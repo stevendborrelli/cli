@@ -439,6 +439,46 @@ func TestGenerateFromMultipleSources_NonMergingGeneratorCopiesEachSourceType(t *
 	}
 }
 
+// conflictingGenerator writes the same path from both source types with
+// different content, and has no schemaMerger -- the case
+// TestGenerateFromMultipleSources_NonMergingGeneratorConflictErrors exercises:
+// a generator without a merge capability must not silently let one source
+// type's output win over the other's at a shared path.
+type conflictingGenerator struct{}
+
+func (conflictingGenerator) Language() string { return "conflicting" }
+
+func (conflictingGenerator) GenerateFromCRD(_ context.Context, _ afero.Fs, _ runner.SchemaRunner) (afero.Fs, error) {
+	out := afero.NewMemMapFs()
+	if err := afero.WriteFile(out, "shared", []byte("from-crd"), 0o600); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (conflictingGenerator) GenerateFromOpenAPI(_ context.Context, _ afero.Fs, _ runner.SchemaRunner) (afero.Fs, error) {
+	out := afero.NewMemMapFs()
+	if err := afero.WriteFile(out, "shared", []byte("from-openapi"), 0o600); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func TestGenerateFromMultipleSources_NonMergingGeneratorConflictErrors(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	testFS := afero.NewMemMapFs()
+	m := New(testFS, []generator.Interface{conflictingGenerator{}}, nil)
+
+	crdSrc := &mockSource{id: "xpkg://a", version: "v1", resources: map[string]string{"a.yaml": "a"}}
+	openAPISrc := &mockSource{id: "k8s://v1", version: "v1", resources: map[string]string{"b.yaml": "b"}, sourceType: SourceTypeOpenAPI}
+
+	if err := m.GenerateFromMultipleSources(ctx, []Source{crdSrc, openAPISrc}); err == nil {
+		t.Fatal("expected an error when a non-merging generator produces conflicting content at the same path from different source types")
+	}
+}
+
 // A language dropped from spec.schemas.languages must not leave its tree
 // behind. Nothing else would ever remove it: it is gone from the generator set,
 // so it is absent from m.languages(), which is what the clearing iterated.

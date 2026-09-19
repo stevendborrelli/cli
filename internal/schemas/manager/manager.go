@@ -18,6 +18,7 @@ limitations under the License.
 package manager
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -564,13 +565,17 @@ func (m *Manager) copyGeneratedSchemaParts(partsByLang map[string][]afero.Fs) er
 
 		merger, ok := m.generatorFor(lang).(schemaMerger)
 		if !ok {
-			// No merge capability needed: each source type's output uses
-			// paths disjoint from the others', so copying them in turn has
-			// the same result as copying one merged tree would.
-			for _, part := range parts {
-				if err := m.copyGeneratedSchemas(map[string]afero.Fs{lang: part}); err != nil {
-					return err
-				}
+			// No merge capability needed: each source type's output is
+			// expected to use paths disjoint from the others'. Union them
+			// rather than copy each in turn, so two parts that turn out to
+			// share a path with different content is a build error instead
+			// of a silent, order-dependent overwrite.
+			union, err := unionSchemaParts(parts)
+			if err != nil {
+				return errors.Wrapf(err, "failed to combine %s schemas generated from multiple source types", lang)
+			}
+			if err := m.copyGeneratedSchemas(map[string]afero.Fs{lang: union}); err != nil {
+				return err
 			}
 			continue
 		}
@@ -596,6 +601,51 @@ func (m *Manager) generatorFor(lang string) generator.Interface {
 		}
 	}
 	return nil
+}
+
+// unionSchemaParts combines multiple source types' output for one language
+// into a single filesystem, erroring if two parts produce different content
+// at the same path rather than letting the later one silently win. Used for
+// a generator with no schemaMerger, whose per-source-type output is expected
+// to use paths disjoint from the others'.
+func unionSchemaParts(parts []afero.Fs) (afero.Fs, error) {
+	union := afero.NewMemMapFs()
+	written := map[string][]byte{}
+
+	for _, part := range parts {
+		if part == nil {
+			continue
+		}
+
+		err := afero.Walk(part, "", func(p string, info fs.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.IsDir() {
+				return nil
+			}
+
+			content, err := afero.ReadFile(part, p)
+			if err != nil {
+				return errors.Wrapf(err, "failed to read %s", p)
+			}
+
+			if existing, ok := written[p]; ok {
+				if !bytes.Equal(existing, content) {
+					return errors.Errorf("%s was generated with different content by more than one source type in the same pass", p)
+				}
+				return nil
+			}
+			written[p] = content
+
+			return afero.WriteFile(union, p, content, 0o644)
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return union, nil
 }
 
 // copyGeneratedSchemas copies generated schemas to the schema repository.

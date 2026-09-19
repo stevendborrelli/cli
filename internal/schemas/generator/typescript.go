@@ -110,16 +110,26 @@ func (t typescriptGenerator) GenerateFromCRD(ctx context.Context, fromFS afero.F
 // index.js/index.d.ts and package.json describing everything it saw, so
 // writing two invocations' output to the same directory would let the second
 // overwrite the first's root files rather than combine with them.
+//
+// index.js and index.d.ts are combined independently, each from only its own
+// same-named source lines -- never cross-mixed -- even though for this
+// generator's output they always end up identical: the root barrel is
+// nothing but `export * as <group> from "./<group>/index.js";` lines, which
+// have no type-level content to differ on, so tsc emits the same text for
+// both the .js and the .d.ts. Every other generated path is specific to the
+// group it was generated for and so belongs to one part, but two parts
+// producing different content at the same path, or a package.json that
+// differs from another part's beyond the version this function re-stamps
+// below, means the toolchain changed between invocations in a way this
+// function does not know how to reconcile -- so it errors rather than
+// silently keep whichever part happened to be seen first.
 func (typescriptGenerator) MergeGeneratedSchemas(parts []afero.Fs) (afero.Fs, error) {
 	merged := afero.NewMemMapFs()
+	written := map[string][]byte{} // path -> content already written, to detect conflicts.
 
-	// The root index re-exports one namespace per API group, e.g.
-	// `export * as apps from "./apps/index.js";`. Every other file's path is
-	// specific to the group it was generated for and so is unique to one
-	// part, but the root index and package.json are the whole package's, and
-	// every part has its own copy describing only what it saw.
-	var barrelLines []string
-	var pkgJSON []byte
+	jsBarrel := newLineSet()
+	dtsBarrel := newLineSet()
+	var pkgJSON, pkgJSONFrom []byte
 
 	for _, part := range parts {
 		if part == nil {
@@ -136,24 +146,31 @@ func (typescriptGenerator) MergeGeneratedSchemas(parts []afero.Fs) (afero.Fs, er
 
 			if path.Dir(p) == typescriptModelsFolder {
 				switch path.Base(p) {
-				case "index.js", "index.d.ts":
+				case "index.js":
 					content, err := afero.ReadFile(part, p)
 					if err != nil {
 						return err
 					}
-					for line := range strings.SplitSeq(string(content), "\n") {
-						if line = strings.TrimSpace(line); line != "" && !slices.Contains(barrelLines, line) {
-							barrelLines = append(barrelLines, line)
-						}
+					jsBarrel.addLines(string(content))
+					return nil
+				case "index.d.ts":
+					content, err := afero.ReadFile(part, p)
+					if err != nil {
+						return err
 					}
+					dtsBarrel.addLines(string(content))
 					return nil
 				case "package.json":
+					content, err := afero.ReadFile(part, p)
+					if err != nil {
+						return err
+					}
 					if pkgJSON == nil {
-						content, err := afero.ReadFile(part, p)
-						if err != nil {
-							return err
-						}
-						pkgJSON = content
+						pkgJSON, pkgJSONFrom = content, []byte(p)
+						return nil
+					}
+					if !packageJSONsEquivalent(pkgJSON, content) {
+						return errors.Errorf("generated package.json at %s differs from %s beyond its version; the pinned toolchain should produce the same manifest regardless of source type", p, pkgJSONFrom)
 					}
 					return nil
 				}
@@ -163,6 +180,15 @@ func (typescriptGenerator) MergeGeneratedSchemas(parts []afero.Fs) (afero.Fs, er
 			if err != nil {
 				return errors.Wrapf(err, "failed to read %s", p)
 			}
+
+			if existing, ok := written[p]; ok {
+				if !bytes.Equal(existing, content) {
+					return errors.Errorf("%s was generated with different content by more than one source type in the same pass", p)
+				}
+				return nil
+			}
+			written[p] = content
+
 			return afero.WriteFile(merged, p, content, 0o644)
 		})
 		if err != nil {
@@ -170,13 +196,10 @@ func (typescriptGenerator) MergeGeneratedSchemas(parts []afero.Fs) (afero.Fs, er
 		}
 	}
 
-	// Sorted so the merged barrel is stable across runs regardless of part order.
-	slices.Sort(barrelLines)
-	barrel := []byte(strings.Join(barrelLines, "\n") + "\n")
-	if err := afero.WriteFile(merged, path.Join(typescriptModelsFolder, "index.js"), barrel, 0o644); err != nil {
+	if err := afero.WriteFile(merged, path.Join(typescriptModelsFolder, "index.js"), jsBarrel.bytes(), 0o644); err != nil {
 		return nil, errors.Wrap(err, "failed to write merged index.js")
 	}
-	if err := afero.WriteFile(merged, path.Join(typescriptModelsFolder, "index.d.ts"), barrel, 0o644); err != nil {
+	if err := afero.WriteFile(merged, path.Join(typescriptModelsFolder, "index.d.ts"), dtsBarrel.bytes(), 0o644); err != nil {
 		return nil, errors.Wrap(err, "failed to write merged index.d.ts")
 	}
 	if pkgJSON != nil {
@@ -192,6 +215,59 @@ func (typescriptGenerator) MergeGeneratedSchemas(parts []afero.Fs) (afero.Fs, er
 	}
 
 	return merged, nil
+}
+
+// lineSet collects trimmed, non-empty, deduplicated lines from one or more
+// files, in a stable sorted order regardless of the order they were added.
+type lineSet struct {
+	seen  map[string]struct{}
+	lines []string
+}
+
+func newLineSet() *lineSet {
+	return &lineSet{seen: map[string]struct{}{}}
+}
+
+func (s *lineSet) addLines(content string) {
+	for line := range strings.SplitSeq(content, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if _, ok := s.seen[line]; ok {
+			continue
+		}
+		s.seen[line] = struct{}{}
+		s.lines = append(s.lines, line)
+	}
+}
+
+func (s *lineSet) bytes() []byte {
+	sorted := slices.Clone(s.lines)
+	slices.Sort(sorted)
+	return []byte(strings.Join(sorted, "\n") + "\n")
+}
+
+// packageJSONsEquivalent reports whether two package.json documents are equal
+// apart from "version": MergeGeneratedSchemas re-stamps it from the combined
+// tree once merging is done, so each part's own previously stamped version
+// legitimately differs and is not itself a conflict.
+func packageJSONsEquivalent(a, b []byte) bool {
+	var pa, pb map[string]any
+	if err := json.Unmarshal(a, &pa); err != nil {
+		return false
+	}
+	if err := json.Unmarshal(b, &pb); err != nil {
+		return false
+	}
+	delete(pa, "version")
+	delete(pb, "version")
+
+	// json.Marshal sorts map keys, so this compares by value regardless of
+	// each document's original key order.
+	ma, errA := json.Marshal(pa)
+	mb, errB := json.Marshal(pb)
+	return errA == nil && errB == nil && bytes.Equal(ma, mb)
 }
 
 // GenerateFromOpenAPI generates TypeScript models from OpenAPI v3 documents in
