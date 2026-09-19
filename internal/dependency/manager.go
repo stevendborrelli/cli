@@ -389,7 +389,9 @@ func (m *Manager) addDependencyNoWrite(ctx context.Context, dep *v1alpha1.Depend
 
 // CollectSources returns all schema sources from the project's dependencies
 // without generating schemas. This allows the caller to merge sources and
-// generate schemas in a single pass.
+// generate schemas in a single pass, which the TypeScript generator requires:
+// its output is one npm package per run, not per source, so generating
+// dependencies one at a time would overwrite it on every source but the last.
 func (m *Manager) CollectSources(ctx context.Context, ch async.EventChannel) ([]smanager.Source, error) {
 	eg, egCtx := errgroup.WithContext(ctx)
 

@@ -360,10 +360,9 @@ func TestMergedPassRegeneratesAfterSingleSourceWrite(t *testing.T) {
 // behind. Nothing else would ever remove it: it is gone from the generator set,
 // so it is absent from m.languages(), which is what the clearing iterated.
 //
-// That is not cosmetic. The TypeScript function builder gates on whether the
-// language directory exists, so an orphaned tree stays load-bearing - a project
-// with a hand-added function keeps building against models no pass will update
-// again, exit 0 and no warning.
+// Otherwise a project with a hand-added TypeScript function would keep
+// building against stale models that no pass will ever update again, with no
+// error or warning.
 func TestRemovedLanguageDirIsCleared(t *testing.T) {
 	t.Parallel()
 
