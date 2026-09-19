@@ -304,18 +304,36 @@ func (m *Manager) GenerateFromMultipleSources(ctx context.Context, sources []Sou
 		return err
 	}
 
+	// Collected per language rather than written immediately: a language whose
+	// generator describes the whole run in its output (TypeScript) needs to see
+	// every source type's contribution before it can produce one coherent tree,
+	// not have a later source type's copy silently replace an earlier one's.
+	partsByLang := make(map[string][]afero.Fs)
+
 	// Generate from CRD sources (merged)
 	if len(crdSources) > 0 {
-		if err := m.generateFromMergedSources(ctx, crdSources, SourceTypeCRD); err != nil {
+		schemas, err := m.generateFromMergedSources(ctx, crdSources, SourceTypeCRD)
+		if err != nil {
 			return errors.Wrap(err, "failed to generate schemas from CRD sources")
+		}
+		for lang, schemaFS := range schemas {
+			partsByLang[lang] = append(partsByLang[lang], schemaFS)
 		}
 	}
 
 	// Generate from OpenAPI sources (merged)
 	if len(openAPISources) > 0 {
-		if err := m.generateFromMergedSources(ctx, openAPISources, SourceTypeOpenAPI); err != nil {
+		schemas, err := m.generateFromMergedSources(ctx, openAPISources, SourceTypeOpenAPI)
+		if err != nil {
 			return errors.Wrap(err, "failed to generate schemas from OpenAPI sources")
 		}
+		for lang, schemaFS := range schemas {
+			partsByLang[lang] = append(partsByLang[lang], schemaFS)
+		}
+	}
+
+	if err := m.copyGeneratedSchemaParts(partsByLang); err != nil {
+		return err
 	}
 
 	return m.recordGeneration(versions, m.languages())
@@ -348,20 +366,16 @@ func (m *Manager) clearLanguageDirs() error {
 }
 
 // generateFromMergedSources merges one group of same-typed sources and
-// generates from them. Freshness, clearing and recording the result belong to
+// generates from them, returning each generator's output keyed by language.
+// Freshness, clearing, copying and recording the result belong to
 // GenerateFromMultipleSources, which owns the whole cycle.
-func (m *Manager) generateFromMergedSources(ctx context.Context, sources []Source, sourceType SourceType) error {
+func (m *Manager) generateFromMergedSources(ctx context.Context, sources []Source, sourceType SourceType) (map[string]afero.Fs, error) {
 	mergedFS, err := m.collectSourceResources(ctx, sources)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	schemas, err := m.runGenerators(ctx, mergedFS, sourceType)
-	if err != nil {
-		return err
-	}
-
-	return m.copyGeneratedSchemas(schemas)
+	return m.runGenerators(ctx, mergedFS, sourceType)
 }
 
 // collectSourceResources merges resources from all sources into a single
@@ -519,6 +533,69 @@ func (m *Manager) runGenerator(ctx context.Context, gen generator.Interface, mer
 	default:
 		return nil, errors.Errorf("unsupported source type %q", sourceType)
 	}
+}
+
+// schemaMerger is implemented by a generator whose output for one language
+// describes an entire generation run rather than one source type: the
+// TypeScript generator's root index.js/index.d.ts and package.json describe
+// every group the run saw, unlike the other generators' per-kind files, which
+// never collide between source types. When more than one source type
+// contributes output for such a language in the same pass,
+// copyGeneratedSchemaParts calls this to combine them into one tree before
+// writing it to disk, instead of letting a later source type's copy silently
+// replace an earlier one's root files.
+type schemaMerger interface {
+	MergeGeneratedSchemas(parts []afero.Fs) (afero.Fs, error)
+}
+
+// copyGeneratedSchemaParts copies each language's generated output to the
+// schema repository, merging the output of multiple source types first for
+// any language whose generator requires it (see schemaMerger). A language
+// with only one part, or whose generator has no merge capability, is copied
+// exactly as copyGeneratedSchemas always has been.
+func (m *Manager) copyGeneratedSchemaParts(partsByLang map[string][]afero.Fs) error {
+	for lang, parts := range partsByLang {
+		if len(parts) == 1 {
+			if err := m.copyGeneratedSchemas(map[string]afero.Fs{lang: parts[0]}); err != nil {
+				return err
+			}
+			continue
+		}
+
+		merger, ok := m.generatorFor(lang).(schemaMerger)
+		if !ok {
+			// No merge capability needed: each source type's output uses
+			// paths disjoint from the others', so copying them in turn has
+			// the same result as copying one merged tree would.
+			for _, part := range parts {
+				if err := m.copyGeneratedSchemas(map[string]afero.Fs{lang: part}); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+
+		merged, err := merger.MergeGeneratedSchemas(parts)
+		if err != nil {
+			return errors.Wrapf(err, "failed to merge %s schemas generated from multiple source types", lang)
+		}
+		if err := m.copyGeneratedSchemas(map[string]afero.Fs{lang: merged}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// generatorFor returns the configured generator for a language, or nil if
+// none matches. lang always comes from a generator's own Language(), so a nil
+// result would mean the generator set changed mid-pass.
+func (m *Manager) generatorFor(lang string) generator.Interface {
+	for _, g := range m.generators {
+		if g.Language() == lang {
+			return g
+		}
+	}
+	return nil
 }
 
 // copyGeneratedSchemas copies generated schemas to the schema repository.

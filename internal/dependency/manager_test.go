@@ -875,6 +875,60 @@ func TestManager_CollectSources_Transitive(t *testing.T) {
 	}
 }
 
+// A second top-level call on the same Manager must traverse every dependency
+// again, not silently skip the ones the first call already claimed. Without
+// resetVisited, a caller that retries CollectSources after a transient
+// failure, or simply calls it twice, would see progressively fewer sources.
+func TestManager_CollectSources_ReusableAcrossCalls(t *testing.T) {
+	const (
+		provA  = "xpkg.example/prov-a"
+		digest = "sha256:5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
+	)
+
+	fc := &fakeClient{
+		packages: map[string]*runtimexpkg.Package{
+			provA + ":v0.1.0": makePackageWithBody(t, provA, digest, "", providerPackageYAML),
+		},
+		tagsByRepo: map[string][]string{
+			provA: {"v0.1.0"},
+		},
+	}
+
+	m := NewManager(
+		&v1alpha1.Project{
+			Spec: v1alpha1.ProjectSpec{
+				Dependencies: []v1alpha1.Dependency{
+					*xpkgDep(provA, "v0.1.0"),
+				},
+				Paths: &v1alpha1.ProjectPaths{Schemas: "schemas"},
+			},
+		},
+		afero.NewMemMapFs(),
+		WithSchemaFS(afero.NewMemMapFs()),
+		WithSchemaGenerators([]generator.Interface{}),
+		WithXpkgClient(fc),
+		WithResolver(clixpkg.NewResolver(fc)),
+	)
+
+	var ch async.EventChannel // nil channel; SendEvent is a no-op.
+	want := []string{"xpkg://" + provA + ":v0.1.0"}
+
+	for _, label := range []string{"first call", "second call"} {
+		sources, err := m.CollectSources(context.Background(), ch)
+		if err != nil {
+			t.Fatalf("CollectSources (%s): %v", label, err)
+		}
+
+		got := make([]string, 0, len(sources))
+		for _, src := range sources {
+			got = append(got, src.ID())
+		}
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("source IDs on %s (-want +got):\n%s", label, diff)
+		}
+	}
+}
+
 func TestManager_CollectSources_RangeAndExactCollapse(t *testing.T) {
 	// A package reached once through a constraint and once through an exact
 	// version is still one package. claim() records the reference as written,

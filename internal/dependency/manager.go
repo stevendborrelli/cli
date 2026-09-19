@@ -264,6 +264,18 @@ func (m *Manager) claim(ref string) bool {
 	return true
 }
 
+// resetVisited clears the set claim consults, so each top-level traversal
+// (AddAll, RefreshAll, CollectSources) starts with none of its dependencies
+// already claimed. Without this, a Manager reused for a second traversal --
+// a retry, or a caller that calls CollectSources more than once -- would see
+// every ref the first traversal claimed as already visited and silently skip
+// it, rather than traverse it again.
+func (m *Manager) resetVisited() {
+	m.visitedMu.Lock()
+	defer m.visitedMu.Unlock()
+	m.visited = make(map[string]struct{})
+}
+
 // dependencyRepo returns the OCI repository of a package metadata dependency,
 // or "" if none is set.
 func dependencyRepo(dep pkgmetav1.Dependency) string {
@@ -314,6 +326,8 @@ func runtimeGVKForPackage(pkg *runtimexpkg.Package) (*schema.GroupVersionKind, e
 // AddDependency adds a dependency, generates schemas for it, and persists the
 // dependency to the project file.
 func (m *Manager) AddDependency(ctx context.Context, dep *v1alpha1.Dependency) error {
+	m.resetVisited()
+
 	gvk, err := m.addDependencyNoWrite(ctx, dep, false)
 	if err != nil {
 		return err
@@ -349,6 +363,8 @@ func (m *Manager) RefreshAll(ctx context.Context, ch async.EventChannel) error {
 }
 
 func (m *Manager) addAll(ctx context.Context, ch async.EventChannel, refresh bool) error {
+	m.resetVisited()
+
 	eg, egCtx := errgroup.WithContext(ctx)
 
 	for i := range m.proj.Spec.Dependencies {
@@ -393,6 +409,8 @@ func (m *Manager) addDependencyNoWrite(ctx context.Context, dep *v1alpha1.Depend
 // its output is one npm package per run, not per source, so generating
 // dependencies one at a time would overwrite it on every source but the last.
 func (m *Manager) CollectSources(ctx context.Context, ch async.EventChannel) ([]smanager.Source, error) {
+	m.resetVisited()
+
 	eg, egCtx := errgroup.WithContext(ctx)
 
 	// One slice per project dependency: a package contributes its own CRDs and

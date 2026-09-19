@@ -102,6 +102,98 @@ func (t typescriptGenerator) GenerateFromCRD(ctx context.Context, fromFS afero.F
 	return t.generateFromCRDFiles(ctx, workFS, crdsDir, r)
 }
 
+// MergeGeneratedSchemas combines the output of running GenerateFromCRD and
+// GenerateFromOpenAPI in the same generation pass into one npm package tree.
+// Called by internal/schemas/manager (via an unexported interface there)
+// only when a single pass produced TypeScript output from more than one
+// source type: each toolchain invocation produces its own root
+// index.js/index.d.ts and package.json describing everything it saw, so
+// writing two invocations' output to the same directory would let the second
+// overwrite the first's root files rather than combine with them.
+func (typescriptGenerator) MergeGeneratedSchemas(parts []afero.Fs) (afero.Fs, error) {
+	merged := afero.NewMemMapFs()
+
+	// The root index re-exports one namespace per API group, e.g.
+	// `export * as apps from "./apps/index.js";`. Every other file's path is
+	// specific to the group it was generated for and so is unique to one
+	// part, but the root index and package.json are the whole package's, and
+	// every part has its own copy describing only what it saw.
+	var barrelLines []string
+	var pkgJSON []byte
+
+	for _, part := range parts {
+		if part == nil {
+			continue
+		}
+
+		err := afero.Walk(part, typescriptModelsFolder, func(p string, info fs.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.IsDir() {
+				return nil
+			}
+
+			if path.Dir(p) == typescriptModelsFolder {
+				switch path.Base(p) {
+				case "index.js", "index.d.ts":
+					content, err := afero.ReadFile(part, p)
+					if err != nil {
+						return err
+					}
+					for line := range strings.SplitSeq(string(content), "\n") {
+						if line = strings.TrimSpace(line); line != "" && !slices.Contains(barrelLines, line) {
+							barrelLines = append(barrelLines, line)
+						}
+					}
+					return nil
+				case "package.json":
+					if pkgJSON == nil {
+						content, err := afero.ReadFile(part, p)
+						if err != nil {
+							return err
+						}
+						pkgJSON = content
+					}
+					return nil
+				}
+			}
+
+			content, err := afero.ReadFile(part, p)
+			if err != nil {
+				return errors.Wrapf(err, "failed to read %s", p)
+			}
+			return afero.WriteFile(merged, p, content, 0o644)
+		})
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to walk generated TypeScript files")
+		}
+	}
+
+	// Sorted so the merged barrel is stable across runs regardless of part order.
+	slices.Sort(barrelLines)
+	barrel := []byte(strings.Join(barrelLines, "\n") + "\n")
+	if err := afero.WriteFile(merged, path.Join(typescriptModelsFolder, "index.js"), barrel, 0o644); err != nil {
+		return nil, errors.Wrap(err, "failed to write merged index.js")
+	}
+	if err := afero.WriteFile(merged, path.Join(typescriptModelsFolder, "index.d.ts"), barrel, 0o644); err != nil {
+		return nil, errors.Wrap(err, "failed to write merged index.d.ts")
+	}
+	if pkgJSON != nil {
+		if err := afero.WriteFile(merged, path.Join(typescriptModelsFolder, "package.json"), pkgJSON, 0o644); err != nil {
+			return nil, errors.Wrap(err, "failed to write merged package.json")
+		}
+	}
+
+	// Each part's package.json was already stamped with a version reflecting
+	// only its own files; re-stamp now that the tree describes everything.
+	if err := stampModelsVersion(merged); err != nil {
+		return nil, err
+	}
+
+	return merged, nil
+}
+
 // GenerateFromOpenAPI generates TypeScript models from OpenAPI v3 documents in
 // fromFS, today produced only by the built-in Kubernetes API dependency type
 // (see k8sOpenAPISource). It uses @kubernetes-models/openapi-generate, a
