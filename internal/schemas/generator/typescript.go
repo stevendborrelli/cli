@@ -173,8 +173,16 @@ func (t typescriptGenerator) collectOpenAPISchemas(fromFS afero.Fs) (map[string]
 }
 
 // toLegacyOpenAPIDefinitions converts a merged OpenAPI v3 components.schemas
-// map into the Swagger 2 "definitions" document that @kubernetes-models/openapi-generate
-// expects.
+// map into the Swagger 2 "definitions" document that
+// @kubernetes-models/openapi-generate expects, rewriting $refs from
+// "#/components/schemas/" to "#/definitions/" to match.
+//
+// It also strips x-kubernetes-group-version-kind from any apimachinery
+// schema registered under more than one GVK, working around a bug in
+// openapi-generate's alias output (tommy351/kubernetes-models-ts#281, fixed
+// by #282). Once a release containing that fix is out and
+// typescript-toolchain/package.json is bumped past it, this step can be
+// removed.
 func toLegacyOpenAPIDefinitions(schemas map[string]json.RawMessage) ([]byte, error) {
 	for id, raw := range schemas {
 		if !strings.HasPrefix(id, "io.k8s.apimachinery.") {
@@ -385,7 +393,7 @@ func (t typescriptGenerator) generateFromCRDFiles(ctx context.Context, workFS af
 }
 
 // runToolchain stages the pinned npm toolchain into workFS and runs
-// generatorCmd -- "npx crd-generate" or "npx openapi-generate",
+// generatorCmd to generate schemas from CRDs or OpenAPI definitions.
 func (t typescriptGenerator) runToolchain(ctx context.Context, workFS afero.Fs, r runner.SchemaRunner, generatorCmd string) (afero.Fs, error) {
 	// Stage the pinned toolchain manifest and lockfile so the container can
 	// install with npm ci rather than resolving version ranges at runtime.
