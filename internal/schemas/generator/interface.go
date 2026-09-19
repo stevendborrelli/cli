@@ -24,7 +24,6 @@ import (
 
 	"github.com/spf13/afero"
 
-	devv1alpha1 "github.com/crossplane/cli/v2/apis/dev/v1alpha1"
 	"github.com/crossplane/cli/v2/internal/schemas/runner"
 )
 
@@ -84,33 +83,12 @@ func AllLanguages(opts ...Option) []Interface {
 	}
 }
 
-// DefaultLanguages returns the languages generated for when a project does not
-// set spec.schemas.languages. Exported so callers can tell a user which
-// languages they will actually get, rather than treating an unset list as
-// permitting anything.
-func DefaultLanguages() []string {
-	return defaultLanguages()
-}
-
-// defaultLanguages returns the languages generated when none are requested
-// explicitly. TypeScript is excluded because it requires Node.js and npm,
-// which adds significant build time. Users can enable it by explicitly
-// listing "typescript" in schemas.languages.
-func defaultLanguages() []string {
-	return []string{
-		devv1alpha1.SchemaLanguageGo,
-		devv1alpha1.SchemaLanguageJSON,
-		devv1alpha1.SchemaLanguageKCL,
-		devv1alpha1.SchemaLanguagePython,
-	}
-}
-
 // Filter returns the subset of generators whose language identifier appears
 // in langs. The order of generators in the result matches the order of all.
-// If langs is empty, the default generators are returned (excluding TypeScript).
+// If langs is empty, all generators are returned unchanged.
 func Filter(all []Interface, langs []string) []Interface {
 	if len(langs) == 0 {
-		langs = defaultLanguages()
+		return all
 	}
 	out := make([]Interface, 0, len(all))
 	for _, g := range all {

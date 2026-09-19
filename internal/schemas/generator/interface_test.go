@@ -106,13 +106,13 @@ func TestFilter(t *testing.T) {
 		want  []string
 	}{
 		"Empty": {
-			// An empty filter returns the default languages (excluding TypeScript,
-			// which requires explicit opt-in due to its Node.js dependency).
+			// An empty filter returns every generator unchanged.
 			want: []string{
 				devv1alpha1.SchemaLanguageGo,
 				devv1alpha1.SchemaLanguageJSON,
 				devv1alpha1.SchemaLanguageKCL,
 				devv1alpha1.SchemaLanguagePython,
+				devv1alpha1.SchemaLanguageTypeScript,
 			},
 		},
 		"SingleLanguage": {

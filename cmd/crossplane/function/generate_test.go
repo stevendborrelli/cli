@@ -254,13 +254,8 @@ func TestGenerateTypeScriptFiles(t *testing.T) {
 				"src/function.test.ts",
 			},
 			wantContains: map[string][]byte{
-				// install-links=true is load-bearing: without it npm symlinks
-				// the file: models dependency, Node resolves the symlink to a
-				// path outside node_modules, and every generated import fails
-				// at runtime. The file reaches the scaffold only because it
-				// happens to match the templates/typescript/*.* glob, so this
-				// asserts that it still does — renaming it to npmrc, or
-				// widening the glob to *, would otherwise drop it silently.
+				// install-links=true is what gets the models into the embedded
+				// function's filesystem from the project schema.
 				".npmrc": []byte("install-links=true"),
 				// The function name is templated into the entrypoint.
 				"src/main.ts": []byte("serve(compose, { name: 'my-func' })"),
@@ -488,6 +483,13 @@ func TestValidateLanguageAgainstSchemas(t *testing.T) {
 	}{
 		"NoSchemaRestriction": {
 			functionLang: "python",
+			schemaLangs:  nil,
+		},
+		"NoSchemaRestrictionAllowsTypeScript": {
+			// An unset schemaLangs means the project generates every
+			// supported language, TypeScript included, so it's not
+			// special-cased here the way an explicit list is below.
+			functionLang: "typescript",
 			schemaLangs:  nil,
 		},
 		"LanguageAllowed": {

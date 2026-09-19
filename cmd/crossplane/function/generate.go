@@ -132,16 +132,10 @@ func (c *generateCmd) AfterApply() error {
 func validateLanguageAgainstSchemas(functionLang string, schemaLangs []string) error {
 	required := functionSchemaLanguage(functionLang)
 
-	// An unset list is not permission for anything: it selects a default set,
-	// which does not include every supported language. Validating against the
-	// defaults is what stops `function generate --language typescript` on a
-	// freshly initialised project from scaffolding a function whose models are
-	// never generated.
+	// An empty schemaLangs means the project generates all languages (matching
+	// generator.Filter), so any function language is fine.
 	if len(schemaLangs) == 0 {
-		if slices.Contains(generator.DefaultLanguages(), required) {
-			return nil
-		}
-		return errors.Errorf("cannot generate a %q function: this project does not set spec.schemas.languages, so it generates %v schemas and not %q; add %q to spec.schemas.languages", functionLang, generator.DefaultLanguages(), required, required)
+		return nil
 	}
 
 	if !slices.Contains(schemaLangs, required) {
