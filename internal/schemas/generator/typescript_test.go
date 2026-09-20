@@ -52,166 +52,162 @@ const testPackageJSON = `{
   }
 }`
 
-func TestMergeGeneratedSchemas_CombinesDistinctGroups(t *testing.T) {
-	// Representative of a CRD pass: one group, its own barrel, and a
-	// package.json identical to the OpenAPI pass's below except its
-	// (already-stamped) version.
-	crdPart := newModelsFS(t, map[string]string{
-		"index.js":                `export * as exampleCom from "./example.com/index.js";` + "\n",
-		"index.d.ts":              `export * as exampleCom from "./example.com/index.js";` + "\n",
-		"example.com/index.js":    `export * from "./Widget.js";`,
-		"example.com/Widget.js":   "export class Widget {}",
-		"example.com/Widget.d.ts": "export declare class Widget {}",
-		"package.json":            strings.Replace(testPackageJSON, `"version": "0.0.0"`, `"version": "0.0.0-crdstamp"`, 1),
-	})
-	// Representative of an OpenAPI pass: a different group.
-	openAPIPart := newModelsFS(t, map[string]string{
-		"index.js":          `export * as v1 from "./v1/index.js";` + "\n",
-		"index.d.ts":        `export * as v1 from "./v1/index.js";` + "\n",
-		"v1/index.js":       `export * from "./Namespace.js";`,
-		"v1/Namespace.js":   "export class Namespace {}",
-		"v1/Namespace.d.ts": "export declare class Namespace {}",
-		"package.json":      strings.Replace(testPackageJSON, `"version": "0.0.0"`, `"version": "0.0.0-openapistamp"`, 1),
-	})
-
-	merged, err := typescriptGenerator{}.MergeGeneratedSchemas([]afero.Fs{crdPart, openAPIPart})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Both groups must be reachable from the root barrel, in both files.
-	for _, barrelPath := range []string{"index.js", "index.d.ts"} {
-		content := readModelsFile(t, merged, barrelPath)
-		for _, want := range []string{`export * as exampleCom from "./example.com/index.js";`, `export * as v1 from "./v1/index.js";`} {
-			if !strings.Contains(content, want) {
-				t.Errorf("%s missing %q:\n%s", barrelPath, want, content)
-			}
-		}
-	}
-
-	// Every per-group file from both parts must survive untouched.
-	for _, p := range []string{"example.com/Widget.js", "example.com/Widget.d.ts", "v1/Namespace.js", "v1/Namespace.d.ts"} {
-		if ok, _ := afero.Exists(merged, path.Join(typescriptModelsFolder, p)); !ok {
-			t.Errorf("missing %s in merged output", p)
-		}
-	}
-
-	// package.json survives (re-stamped, so just check it still parses and
-	// still names the runtime dependencies both parts agreed on).
-	pkg := readModelsFile(t, merged, "package.json")
-	if !strings.Contains(pkg, "@kubernetes-models/base") {
-		t.Errorf("merged package.json lost a dependency:\n%s", pkg)
-	}
-}
-
-func TestMergeGeneratedSchemas_DeduplicatesSharedBarrelLines(t *testing.T) {
+func TestMergeGeneratedSchemas(t *testing.T) {
 	shared := `export * as apimachinery from "./apimachinery/index.js";` + "\n"
-	partA := newModelsFS(t, map[string]string{
-		"index.js":     shared + `export * as exampleCom from "./example.com/index.js";` + "\n",
-		"index.d.ts":   shared + `export * as exampleCom from "./example.com/index.js";` + "\n",
-		"package.json": testPackageJSON,
-	})
-	partB := newModelsFS(t, map[string]string{
-		"index.js":     shared + `export * as v1 from "./v1/index.js";` + "\n",
-		"index.d.ts":   shared + `export * as v1 from "./v1/index.js";` + "\n",
-		"package.json": testPackageJSON,
-	})
+	sameObjectMeta := "export declare class ObjectMeta {}"
 
-	merged, err := typescriptGenerator{}.MergeGeneratedSchemas([]afero.Fs{partA, partB})
-	if err != nil {
-		t.Fatal(err)
+	cases := map[string]struct {
+		// One newModelsFS input per part.
+		parts []map[string]string
+		// If set, MergeGeneratedSchemas must fail and check is not called.
+		wantErr bool
+		// Extra assertions against a successful merge's output.
+		check func(t *testing.T, merged afero.Fs)
+	}{
+		"CombinesDistinctGroups": {
+			// A CRD pass (one group) and an OpenAPI pass (a different
+			// group), each with its own barrel and a package.json identical
+			// to the other's except its (already-stamped) version.
+			parts: []map[string]string{
+				{
+					"index.js":                `export * as exampleCom from "./example.com/index.js";` + "\n",
+					"index.d.ts":              `export * as exampleCom from "./example.com/index.js";` + "\n",
+					"example.com/index.js":    `export * from "./Widget.js";`,
+					"example.com/Widget.js":   "export class Widget {}",
+					"example.com/Widget.d.ts": "export declare class Widget {}",
+					"package.json":            strings.Replace(testPackageJSON, `"version": "0.0.0"`, `"version": "0.0.0-crdstamp"`, 1),
+				},
+				{
+					"index.js":          `export * as v1 from "./v1/index.js";` + "\n",
+					"index.d.ts":        `export * as v1 from "./v1/index.js";` + "\n",
+					"v1/index.js":       `export * from "./Namespace.js";`,
+					"v1/Namespace.js":   "export class Namespace {}",
+					"v1/Namespace.d.ts": "export declare class Namespace {}",
+					"package.json":      strings.Replace(testPackageJSON, `"version": "0.0.0"`, `"version": "0.0.0-openapistamp"`, 1),
+				},
+			},
+			check: func(t *testing.T, merged afero.Fs) {
+				// Both groups must be reachable from the root barrel, in both files.
+				for _, barrelPath := range []string{"index.js", "index.d.ts"} {
+					content := readModelsFile(t, merged, barrelPath)
+					for _, want := range []string{`export * as exampleCom from "./example.com/index.js";`, `export * as v1 from "./v1/index.js";`} {
+						if !strings.Contains(content, want) {
+							t.Errorf("%s missing %q:\n%s", barrelPath, want, content)
+						}
+					}
+				}
+
+				// Every per-group file from both parts must survive untouched.
+				for _, p := range []string{"example.com/Widget.js", "example.com/Widget.d.ts", "v1/Namespace.js", "v1/Namespace.d.ts"} {
+					if ok, _ := afero.Exists(merged, path.Join(typescriptModelsFolder, p)); !ok {
+						t.Errorf("missing %s in merged output", p)
+					}
+				}
+
+				// package.json survives (re-stamped, so just check it still
+				// parses and still names the runtime dependencies both
+				// parts agreed on).
+				pkg := readModelsFile(t, merged, "package.json")
+				if !strings.Contains(pkg, "@kubernetes-models/base") {
+					t.Errorf("merged package.json lost a dependency:\n%s", pkg)
+				}
+			},
+		},
+		"DeduplicatesSharedBarrelLines": {
+			parts: []map[string]string{
+				{
+					"index.js":     shared + `export * as exampleCom from "./example.com/index.js";` + "\n",
+					"index.d.ts":   shared + `export * as exampleCom from "./example.com/index.js";` + "\n",
+					"package.json": testPackageJSON,
+				},
+				{
+					"index.js":     shared + `export * as v1 from "./v1/index.js";` + "\n",
+					"index.d.ts":   shared + `export * as v1 from "./v1/index.js";` + "\n",
+					"package.json": testPackageJSON,
+				},
+			},
+			check: func(t *testing.T, merged afero.Fs) {
+				for _, barrelPath := range []string{"index.js", "index.d.ts"} {
+					content := readModelsFile(t, merged, barrelPath)
+					if n := strings.Count(content, shared); n != 1 {
+						t.Errorf("%s: shared line appears %d times, want 1 (deduplicated):\n%s", barrelPath, n, content)
+					}
+				}
+			},
+		},
+		// The root barrel is combined independently for index.js and
+		// index.d.ts -- never cross-mixed -- even though for the real
+		// generator they always end up identical. This part deliberately
+		// makes them not, to prove a line from one never leaks into the
+		// other.
+		"KeepsJSAndDTSBarrelsIndependent": {
+			parts: []map[string]string{
+				{
+					"index.js":     `export * as onlyInJS from "./a/index.js";` + "\n",
+					"index.d.ts":   `export * as onlyInDTS from "./b/index.js";` + "\n",
+					"package.json": testPackageJSON,
+				},
+			},
+			check: func(t *testing.T, merged afero.Fs) {
+				js := readModelsFile(t, merged, "index.js")
+				dts := readModelsFile(t, merged, "index.d.ts")
+				if strings.Contains(js, "onlyInDTS") {
+					t.Errorf("index.js picked up a line from index.d.ts:\n%s", js)
+				}
+				if strings.Contains(dts, "onlyInJS") {
+					t.Errorf("index.d.ts picked up a line from index.js:\n%s", dts)
+				}
+			},
+		},
+		"IdenticalFileContentIsNotAConflict": {
+			parts: []map[string]string{
+				{"apimachinery/ObjectMeta.d.ts": sameObjectMeta, "package.json": testPackageJSON},
+				{"apimachinery/ObjectMeta.d.ts": sameObjectMeta, "package.json": testPackageJSON},
+			},
+		},
+		"ConflictingFileContentErrors": {
+			parts: []map[string]string{
+				{"apimachinery/ObjectMeta.d.ts": "export declare class ObjectMeta { a: string }", "package.json": testPackageJSON},
+				{"apimachinery/ObjectMeta.d.ts": "export declare class ObjectMeta { b: string }", "package.json": testPackageJSON},
+			},
+			wantErr: true,
+		},
+		"PackageJSONVersionOnlyDifferenceIsNotAConflict": {
+			parts: []map[string]string{
+				{"package.json": strings.Replace(testPackageJSON, `"version": "0.0.0"`, `"version": "0.0.0-aaa"`, 1)},
+				{"package.json": strings.Replace(testPackageJSON, `"version": "0.0.0"`, `"version": "0.0.0-bbb"`, 1)},
+			},
+		},
+		"PackageJSONContentMismatchErrors": {
+			parts: []map[string]string{
+				{"package.json": testPackageJSON},
+				{"package.json": strings.Replace(testPackageJSON, `"@kubernetes-models/base": "^6.0.1"`, `"@kubernetes-models/base": "^7.0.0"`, 1)},
+			},
+			wantErr: true,
+		},
 	}
 
-	for _, barrelPath := range []string{"index.js", "index.d.ts"} {
-		content := readModelsFile(t, merged, barrelPath)
-		if n := strings.Count(content, shared); n != 1 {
-			t.Errorf("%s: shared line appears %d times, want 1 (deduplicated):\n%s", barrelPath, n, content)
-		}
-	}
-}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			parts := make([]afero.Fs, len(tc.parts))
+			for i, files := range tc.parts {
+				parts[i] = newModelsFS(t, files)
+			}
 
-// The root barrel is combined independently for index.js and index.d.ts --
-// never cross-mixed -- even though for the real generator they always end up
-// identical. This constructs parts where they deliberately are not, to prove
-// a line from one never leaks into the other.
-func TestMergeGeneratedSchemas_KeepsJSAndDTSBarrelsIndependent(t *testing.T) {
-	part := newModelsFS(t, map[string]string{
-		"index.js":     `export * as onlyInJS from "./a/index.js";` + "\n",
-		"index.d.ts":   `export * as onlyInDTS from "./b/index.js";` + "\n",
-		"package.json": testPackageJSON,
-	})
-
-	merged, err := typescriptGenerator{}.MergeGeneratedSchemas([]afero.Fs{part})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	js := readModelsFile(t, merged, "index.js")
-	dts := readModelsFile(t, merged, "index.d.ts")
-	if strings.Contains(js, "onlyInDTS") {
-		t.Errorf("index.js picked up a line from index.d.ts:\n%s", js)
-	}
-	if strings.Contains(dts, "onlyInJS") {
-		t.Errorf("index.d.ts picked up a line from index.js:\n%s", dts)
-	}
-}
-
-func TestMergeGeneratedSchemas_IdenticalFileContentIsNotAConflict(t *testing.T) {
-	shared := "export declare class ObjectMeta {}"
-	partA := newModelsFS(t, map[string]string{
-		"apimachinery/ObjectMeta.d.ts": shared,
-		"package.json":                 testPackageJSON,
-	})
-	partB := newModelsFS(t, map[string]string{
-		"apimachinery/ObjectMeta.d.ts": shared,
-		"package.json":                 testPackageJSON,
-	})
-
-	if _, err := (typescriptGenerator{}).MergeGeneratedSchemas([]afero.Fs{partA, partB}); err != nil {
-		t.Fatalf("identical content at the same path from two parts should not be a conflict: %v", err)
-	}
-}
-
-func TestMergeGeneratedSchemas_ConflictingFileContentErrors(t *testing.T) {
-	partA := newModelsFS(t, map[string]string{
-		"apimachinery/ObjectMeta.d.ts": "export declare class ObjectMeta { a: string }",
-		"package.json":                 testPackageJSON,
-	})
-	partB := newModelsFS(t, map[string]string{
-		"apimachinery/ObjectMeta.d.ts": "export declare class ObjectMeta { b: string }",
-		"package.json":                 testPackageJSON,
-	})
-
-	_, err := typescriptGenerator{}.MergeGeneratedSchemas([]afero.Fs{partA, partB})
-	if err == nil {
-		t.Fatal("expected an error when two source types generate different content at the same path")
-	}
-}
-
-func TestMergeGeneratedSchemas_PackageJSONVersionOnlyDifferenceIsNotAConflict(t *testing.T) {
-	partA := newModelsFS(t, map[string]string{
-		"package.json": strings.Replace(testPackageJSON, `"version": "0.0.0"`, `"version": "0.0.0-aaa"`, 1),
-	})
-	partB := newModelsFS(t, map[string]string{
-		"package.json": strings.Replace(testPackageJSON, `"version": "0.0.0"`, `"version": "0.0.0-bbb"`, 1),
-	})
-
-	if _, err := (typescriptGenerator{}).MergeGeneratedSchemas([]afero.Fs{partA, partB}); err != nil {
-		t.Fatalf("package.json differing only by version (each part's own prior stamp) should not be a conflict: %v", err)
-	}
-}
-
-func TestMergeGeneratedSchemas_PackageJSONContentMismatchErrors(t *testing.T) {
-	partA := newModelsFS(t, map[string]string{
-		"package.json": testPackageJSON,
-	})
-	partB := newModelsFS(t, map[string]string{
-		"package.json": strings.Replace(testPackageJSON, `"@kubernetes-models/base": "^6.0.1"`, `"@kubernetes-models/base": "^7.0.0"`, 1),
-	})
-
-	_, err := typescriptGenerator{}.MergeGeneratedSchemas([]afero.Fs{partA, partB})
-	if err == nil {
-		t.Fatal("expected an error when two parts' package.json differ beyond their version")
+			merged, err := typescriptGenerator{}.MergeGeneratedSchemas(parts)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected an error, got none")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.check != nil {
+				tc.check(t, merged)
+			}
+		})
 	}
 }
 
