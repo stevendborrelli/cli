@@ -182,7 +182,12 @@ func (b *typescriptBuilder) buildFunction(ctx context.Context, c BuildContext) (
 	fnFS := c.FunctionFS()
 	// Exclude node_modules the user might have created locally.
 	// Use the function path as the tar prefix so files end up at /<FunctionPath> in the container.
-	fnTar, err := filesystem.FSToTar(fnFS, c.FunctionPath, filesystem.WithExcludePrefix("node_modules"))
+	// WithSymlinkBasePath lets a symlinked source file resolve instead of
+	// failing the build, matching the Go, KCL and go-templating builders.
+	fnTar, err := filesystem.FSToTar(fnFS, c.FunctionPath,
+		filesystem.WithExcludePrefix("node_modules"),
+		filesystem.WithSymlinkBasePath(c.OSBasePath),
+	)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to tar function source")
 	}

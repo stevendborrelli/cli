@@ -30,8 +30,10 @@ import (
 	"context"
 	"embed"
 	"io"
+	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -140,6 +142,80 @@ func TestTypeScriptBuildMultiArch(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "***hi") {
 		t.Errorf("container output = %q, want it to contain %q (left-pad resolved and ran)", out, "***hi")
+	}
+}
+
+// TestTypeScriptBuildFollowsSymlinkedSourceFile builds a function whose
+// source tree contains a symlink -- common with local development tooling,
+// shared source files, or workspace layouts. filesystem.FSToTar errors on a
+// symlink unless it's given the function's real on-disk path to resolve it
+// against, so this must run against a real OS filesystem, not the embedded
+// fixture the other tests in this file use: embed.FS has no notion of a
+// symlink to begin with, so it can't exercise this path at all.
+func TestTypeScriptBuildFollowsSymlinkedSourceFile(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile := func(rel, content string) {
+		t.Helper()
+		full := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	writeFile("package.json", `{
+  "name": "function",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "left-pad": "1.3.0"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}
+`)
+	writeFile("tsconfig.json", `{
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "module": "nodenext",
+    "target": "esnext",
+    "skipLibCheck": true
+  }
+}
+`)
+	writeFile("src/util.ts", `export const greet = (): string => "hello-from-symlink";
+`)
+	writeFile("src/main.ts", `import { greet } from "./util-linked.js";
+
+console.log(greet());
+`)
+	// The symlinked file main.ts actually imports, not just an unused one:
+	// proves the build follows it to real content, not merely tolerates it.
+	if err := os.Symlink(filepath.Join(dir, "src", "util.ts"), filepath.Join(dir, "src", "util-linked.ts")); err != nil {
+		t.Fatal(err)
+	}
+
+	b := newTypeScriptBuilder(nil)
+	fnImgs, err := b.Build(context.Background(), BuildContext{
+		ProjectFS:     afero.NewOsFs(),
+		FunctionPath:  dir,
+		OSBasePath:    dir,
+		Architectures: []string{runtime.GOARCH},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(fnImgs), 1; got != want {
+		t.Fatalf("len(fnImgs) = %d, want %d", got, want)
 	}
 }
 
