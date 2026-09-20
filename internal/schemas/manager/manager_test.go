@@ -315,7 +315,7 @@ func (g *indexingGenerator) GenerateFromOpenAPI(_ context.Context, _ afero.Fs, _
 type mergingIndexingGenerator struct{ indexingGenerator }
 
 func (g *mergingIndexingGenerator) GenerateFromOpenAPI(ctx context.Context, in afero.Fs, r runner.SchemaRunner) (afero.Fs, error) {
-	return g.indexingGenerator.GenerateFromCRD(ctx, in, r)
+	return g.GenerateFromCRD(ctx, in, r)
 }
 
 func (g *mergingIndexingGenerator) MergeGeneratedSchemas(parts []afero.Fs) (afero.Fs, error) {

@@ -87,6 +87,7 @@ func TestMergeGeneratedSchemas(t *testing.T) {
 				},
 			},
 			check: func(t *testing.T, merged afero.Fs) {
+				t.Helper()
 				// Both groups must be reachable from the root barrel, in both files.
 				for _, barrelPath := range []string{"index.js", "index.d.ts"} {
 					content := readModelsFile(t, merged, barrelPath)
@@ -127,6 +128,7 @@ func TestMergeGeneratedSchemas(t *testing.T) {
 				},
 			},
 			check: func(t *testing.T, merged afero.Fs) {
+				t.Helper()
 				for _, barrelPath := range []string{"index.js", "index.d.ts"} {
 					content := readModelsFile(t, merged, barrelPath)
 					if n := strings.Count(content, shared); n != 1 {
@@ -149,6 +151,7 @@ func TestMergeGeneratedSchemas(t *testing.T) {
 				},
 			},
 			check: func(t *testing.T, merged afero.Fs) {
+				t.Helper()
 				js := readModelsFile(t, merged, "index.js")
 				dts := readModelsFile(t, merged, "index.d.ts")
 				if strings.Contains(js, "onlyInDTS") {

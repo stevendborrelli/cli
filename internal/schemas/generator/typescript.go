@@ -124,12 +124,7 @@ func (t typescriptGenerator) GenerateFromCRD(ctx context.Context, fromFS afero.F
 // function does not know how to reconcile -- so it errors rather than
 // silently keep whichever part happened to be seen first.
 func (typescriptGenerator) MergeGeneratedSchemas(parts []afero.Fs) (afero.Fs, error) {
-	merged := afero.NewMemMapFs()
-	written := map[string][]byte{} // path -> content already written, to detect conflicts.
-
-	jsBarrel := newLineSet()
-	dtsBarrel := newLineSet()
-	var pkgJSON, pkgJSONFrom []byte
+	m := newTypescriptMerge()
 
 	for _, part := range parts {
 		if part == nil {
@@ -143,78 +138,119 @@ func (typescriptGenerator) MergeGeneratedSchemas(parts []afero.Fs) (afero.Fs, er
 			if info.IsDir() {
 				return nil
 			}
-
-			if path.Dir(p) == typescriptModelsFolder {
-				switch path.Base(p) {
-				case "index.js":
-					content, err := afero.ReadFile(part, p)
-					if err != nil {
-						return err
-					}
-					jsBarrel.addLines(string(content))
-					return nil
-				case "index.d.ts":
-					content, err := afero.ReadFile(part, p)
-					if err != nil {
-						return err
-					}
-					dtsBarrel.addLines(string(content))
-					return nil
-				case "package.json":
-					content, err := afero.ReadFile(part, p)
-					if err != nil {
-						return err
-					}
-					if pkgJSON == nil {
-						pkgJSON, pkgJSONFrom = content, []byte(p)
-						return nil
-					}
-					if !packageJSONsEquivalent(pkgJSON, content) {
-						return errors.Errorf("generated package.json at %s differs from %s beyond its version; the pinned toolchain should produce the same manifest regardless of source type", p, pkgJSONFrom)
-					}
-					return nil
-				}
-			}
-
-			content, err := afero.ReadFile(part, p)
-			if err != nil {
-				return errors.Wrapf(err, "failed to read %s", p)
-			}
-
-			if existing, ok := written[p]; ok {
-				if !bytes.Equal(existing, content) {
-					return errors.Errorf("%s was generated with different content by more than one source type in the same pass", p)
-				}
-				return nil
-			}
-			written[p] = content
-
-			return afero.WriteFile(merged, p, content, 0o644)
+			return m.addFile(part, p)
 		})
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to walk generated TypeScript files")
 		}
 	}
 
-	if err := afero.WriteFile(merged, path.Join(typescriptModelsFolder, "index.js"), jsBarrel.bytes(), 0o644); err != nil {
+	return m.finish()
+}
+
+// typescriptMerge accumulates state while MergeGeneratedSchemas walks each
+// part's generated output.
+type typescriptMerge struct {
+	merged  afero.Fs
+	written map[string][]byte // path -> content already written, to detect conflicts.
+
+	jsBarrel  *lineSet
+	dtsBarrel *lineSet
+
+	pkgJSON     []byte
+	pkgJSONFrom string
+}
+
+func newTypescriptMerge() *typescriptMerge {
+	return &typescriptMerge{
+		merged:    afero.NewMemMapFs(),
+		written:   map[string][]byte{},
+		jsBarrel:  newLineSet(),
+		dtsBarrel: newLineSet(),
+	}
+}
+
+// addFile incorporates one file from one part: the root barrels and
+// package.json get special handling (see MergeGeneratedSchemas' doc
+// comment), everything else is copied once and checked for conflicts.
+func (m *typescriptMerge) addFile(part afero.Fs, p string) error {
+	if path.Dir(p) == typescriptModelsFolder {
+		switch path.Base(p) {
+		case "index.js":
+			return m.addBarrelFile(part, p, m.jsBarrel)
+		case "index.d.ts":
+			return m.addBarrelFile(part, p, m.dtsBarrel)
+		case "package.json":
+			return m.addPackageJSON(part, p)
+		}
+	}
+	return m.addGenericFile(part, p)
+}
+
+func (m *typescriptMerge) addBarrelFile(part afero.Fs, p string, barrel *lineSet) error {
+	content, err := afero.ReadFile(part, p)
+	if err != nil {
+		return err
+	}
+	barrel.addLines(string(content))
+	return nil
+}
+
+func (m *typescriptMerge) addPackageJSON(part afero.Fs, p string) error {
+	content, err := afero.ReadFile(part, p)
+	if err != nil {
+		return err
+	}
+	if m.pkgJSON == nil {
+		m.pkgJSON, m.pkgJSONFrom = content, p
+		return nil
+	}
+	if !packageJSONsEquivalent(m.pkgJSON, content) {
+		return errors.Errorf("generated package.json at %s differs from %s beyond its version; the pinned toolchain should produce the same manifest regardless of source type", p, m.pkgJSONFrom)
+	}
+	return nil
+}
+
+func (m *typescriptMerge) addGenericFile(part afero.Fs, p string) error {
+	content, err := afero.ReadFile(part, p)
+	if err != nil {
+		return errors.Wrapf(err, "failed to read %s", p)
+	}
+
+	if existing, ok := m.written[p]; ok {
+		if !bytes.Equal(existing, content) {
+			return errors.Errorf("%s was generated with different content by more than one source type in the same pass", p)
+		}
+		return nil
+	}
+	m.written[p] = content
+
+	return afero.WriteFile(m.merged, p, content, 0o644)
+}
+
+// finish writes the combined barrels and package.json, re-stamps the
+// package's version now that it describes every part, and returns the
+// merged filesystem.
+func (m *typescriptMerge) finish() (afero.Fs, error) {
+	if err := afero.WriteFile(m.merged, path.Join(typescriptModelsFolder, "index.js"), m.jsBarrel.bytes(), 0o644); err != nil {
 		return nil, errors.Wrap(err, "failed to write merged index.js")
 	}
-	if err := afero.WriteFile(merged, path.Join(typescriptModelsFolder, "index.d.ts"), dtsBarrel.bytes(), 0o644); err != nil {
+	if err := afero.WriteFile(m.merged, path.Join(typescriptModelsFolder, "index.d.ts"), m.dtsBarrel.bytes(), 0o644); err != nil {
 		return nil, errors.Wrap(err, "failed to write merged index.d.ts")
 	}
-	if pkgJSON != nil {
-		if err := afero.WriteFile(merged, path.Join(typescriptModelsFolder, "package.json"), pkgJSON, 0o644); err != nil {
+	if m.pkgJSON != nil {
+		if err := afero.WriteFile(m.merged, path.Join(typescriptModelsFolder, "package.json"), m.pkgJSON, 0o644); err != nil {
 			return nil, errors.Wrap(err, "failed to write merged package.json")
 		}
 	}
 
 	// Each part's package.json was already stamped with a version reflecting
 	// only its own files; re-stamp now that the tree describes everything.
-	if err := stampModelsVersion(merged); err != nil {
+	if err := stampModelsVersion(m.merged); err != nil {
 		return nil, err
 	}
 
-	return merged, nil
+	return m.merged, nil
 }
 
 // lineSet collects trimmed, non-empty, deduplicated lines from one or more
@@ -358,7 +394,8 @@ func toLegacyOpenAPIDefinitions(schemas map[string]json.RawMessage) ([]byte, err
 		}
 
 		var withGVK struct {
-			GVK []json.RawMessage `json:"x-kubernetes-group-version-kind"`
+			// The literal Kubernetes OpenAPI extension name, not ours to rename.
+			GVK []json.RawMessage `json:"x-kubernetes-group-version-kind"` //nolint:tagliatelle // Kubernetes API field name.
 		}
 		if err := json.Unmarshal(raw, &withGVK); err != nil {
 			return nil, errors.Wrapf(err, "failed to parse schema %q", id)

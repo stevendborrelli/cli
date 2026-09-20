@@ -124,13 +124,12 @@ func (c *generateCmd) AfterApply() error {
 // models to import, which is surprising, so we fail up front rather than
 // scaffolding a function that can't compile.
 func validateLanguageAgainstSchemas(functionLang string, schemaLangs []string) error {
-	required := functionSchemaLanguage(functionLang)
-
 	// An empty schemaLangs means the project generates all languages (matching
 	// generator.Filter), so any function language is fine.
 	if len(schemaLangs) == 0 {
 		return nil
 	}
+	required := functionSchemaLanguage(functionLang)
 
 	if !slices.Contains(schemaLangs, required) {
 		return errors.Errorf("cannot generate a %q function: the project only generates %v schemas; add %q to spec.schemas.languages or choose a different language", functionLang, schemaLangs, required)

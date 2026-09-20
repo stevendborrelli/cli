@@ -16,19 +16,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// This test runs the real npm toolchain in a build container, pulls the real
-// distroless runtime image over the network, and, for the host's own
-// architecture, runs the built image itself, so it can't run in the
-// hermetic Nix sandbox that runs our unit tests -- run it locally with a
-// Docker daemon available:
-//
-//	go test -tags dockergate ./internal/project/functions/... -run TestTypeScriptBuildMultiArch -v
 package functions
 
 import (
 	"archive/tar"
 	"context"
 	"embed"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -58,6 +52,13 @@ var typescriptFunction embed.FS
 // nonroot with the documented entrypoint, and -- for whichever architecture
 // matches the host, so no emulation is required -- actually starts and
 // resolves its dependency at runtime.
+//
+// It runs the real npm toolchain in a build container and pulls the real
+// distroless runtime image over the network, so it can't run in the
+// hermetic Nix sandbox that runs our unit tests -- run it locally with a
+// Docker daemon available:
+//
+//	go test -tags dockergate ./internal/project/functions/... -run TestTypeScriptBuildMultiArch -v
 func TestTypeScriptBuildMultiArch(t *testing.T) {
 	archs := []string{"amd64", "arm64"}
 
@@ -133,10 +134,11 @@ func TestTypeScriptBuildMultiArch(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		_ = exec.Command("docker", "rmi", "-f", tag.String()).Run() //nolint:errcheck,gosec // Best-effort cleanup.
+		// Best-effort cleanup; nothing to do if it fails.
+		_ = exec.Command("docker", "rmi", "-f", tag.String()).Run()
 	})
 
-	out, err := exec.CommandContext(context.Background(), "docker", "run", "--rm", tag.String()).CombinedOutput() //nolint:gosec // Fixed args; not user input.
+	out, err := exec.CommandContext(context.Background(), "docker", "run", "--rm", tag.String()).CombinedOutput()
 	if err != nil {
 		t.Fatalf("docker run failed: %v\noutput:\n%s", err, out)
 	}
@@ -243,12 +245,12 @@ func statInImage(t *testing.T, img v1.Image, imgPath string) (string, bool) {
 	imgPath = strings.TrimPrefix(imgPath, "/")
 
 	rc := mutate.Extract(img)
-	defer rc.Close() //nolint:errcheck // Best-effort close of a read-only stream.
+	defer rc.Close() // Best-effort close of a read-only stream.
 
 	tr := tar.NewReader(rc)
 	for {
 		hdr, err := tr.Next()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return "", false
 		}
 		if err != nil {

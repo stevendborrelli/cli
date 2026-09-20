@@ -16,11 +16,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// This test runs the real TypeScript toolchain in a container, so it can't
-// run in the hermetic Nix sandbox that runs our unit tests -- run it locally
-// with a Docker daemon available:
-//
-//	go test -tags dockergate ./internal/schemas/manager/... -run TestGenerateFromMultipleSourcesTypeScriptRealToolchain -v
 package manager
 
 import (
@@ -67,13 +62,20 @@ func tsGeneratorOnly() generator.Interface {
 	panic("no typescript generator")
 }
 
-// This is the real-toolchain counterpart to
+// TestGenerateFromMultipleSourcesTypeScriptRealToolchain is the
+// real-toolchain counterpart to
 // TestGenerateFromMultipleSources_MergesAcrossSourceTypes: that test proves
 // the manager's merge dispatch with a mock generator; this proves the actual
 // TypeScript generator's MergeGeneratedSchemas produces a correct, compilable
 // package when a project has both a CRD/XRD source (its own APIs, or a CRD
 // dependency) and an OpenAPI source (a k8s: dependency) -- the case a real
 // project is likely to have.
+//
+// It runs the real TypeScript toolchain in a container, so it can't run in
+// the hermetic Nix sandbox that runs our unit tests -- run it locally with a
+// Docker daemon available:
+//
+//	go test -tags dockergate ./internal/schemas/manager/... -run TestGenerateFromMultipleSourcesTypeScriptRealToolchain -v
 func TestGenerateFromMultipleSourcesTypeScriptRealToolchain(t *testing.T) {
 	testdataFS := afero.NewBasePathFs(afero.FromIOFS{FS: typescriptDockergateTestdataFS}, "testdata")
 
@@ -182,7 +184,7 @@ new v1.Namespace();
 
 	run := func(name string, args ...string) {
 		t.Helper()
-		cmd := exec.Command(name, args...) //nolint:gosec // Fixed args; not user input.
+		cmd := exec.Command(name, args...)
 		cmd.Dir = dir
 		out, err := cmd.CombinedOutput()
 		if err != nil {

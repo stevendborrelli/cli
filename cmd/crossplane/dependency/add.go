@@ -108,13 +108,9 @@ func (c *addCmd) Run(logger logging.Logger, sp terminal.SpinnerPrinter, cfg *con
 
 	desc := dependency.GetSourceDescription(dep)
 	logger.Debug("Adding dependency", "dependency", desc)
-	if err := sp.WrapWithSuccessSpinner("Adding "+desc, func() error {
+	return sp.WrapWithSuccessSpinner("Adding "+desc, func() error {
 		return m.AddDependency(ctx, &dep)
-	}); err != nil {
-		return err
-	}
-
-	return nil
+	})
 }
 
 func (c *addCmd) buildDependency() (v1alpha1.Dependency, error) {
