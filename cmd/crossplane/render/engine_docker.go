@@ -54,6 +54,8 @@ type dockerRenderEngine struct {
 	image string
 	// network is the Docker network to connect the container to.
 	network string
+	// args are extra arguments for crossplane internal render.
+	args []string
 
 	log logging.Logger
 
@@ -135,7 +137,7 @@ func (e *dockerRenderEngine) Render(ctx context.Context, req *renderv1alpha1.Ren
 	}
 
 	opts := []docker.RunContainerOption{
-		docker.RunWithCommand([]string{"internal", "render"}),
+		docker.RunWithCommand(append([]string{"internal", "render"}, e.args...)),
 		docker.RunWithStdin(data),
 		// Let the container access any functions running in development mode on
 		// the host.

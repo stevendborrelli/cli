@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -28,6 +29,8 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/testing/protocmp"
 	"google.golang.org/protobuf/types/known/structpb"
+
+	"github.com/crossplane/crossplane-runtime/v2/pkg/logging"
 
 	renderv1alpha1 "github.com/crossplane/cli/v2/proto/render/v1alpha1"
 )
@@ -64,6 +67,10 @@ import (
 // fully self-contained, deterministic, cross-platform fake binary with
 // access to the same proto types the tests assert on.
 const envHelperMode = "GO_HELPER_LOCAL_RENDER_MODE"
+
+// envHelperArgs are the extra arguments the echo-args helper expects after
+// `internal render`, separated by spaces.
+const envHelperArgs = "GO_HELPER_LOCAL_RENDER_ARGS"
 
 // TestMain re-uses os.Args[0] as a stand-in for the `crossplane` binary when
 // the engine_local tests want to control its stdout/stderr/exit-code. When
@@ -105,6 +112,16 @@ func runRenderHelper(mode string) {
 	case "hard-fail":
 		fmt.Fprint(os.Stderr, "the binary is sad")
 		os.Exit(1)
+	case "echo-args":
+		// Succeeds only if it was run as `internal render` followed by the
+		// arguments the test expects, so a test can see what reached it.
+		want := append([]string{"internal", "render"}, strings.Fields(os.Getenv(envHelperArgs))...)
+		if got := os.Args[1:]; !slices.Equal(got, want) {
+			fmt.Fprintf(os.Stderr, "helper: want args %q, got %q", want, got)
+			os.Exit(1)
+		}
+		_, _ = os.Stdout.Write(rspBytes)
+		os.Exit(0)
 	default:
 		fmt.Fprintf(os.Stderr, "helper: unknown mode %q\n", mode)
 		os.Exit(127)
@@ -228,6 +245,36 @@ func TestLocalRenderEngineRender(t *testing.T) {
 
 			if diff := cmp.Diff(tc.want.rsp, rsp, protocmp.Transform()); diff != "" {
 				t.Errorf("\n%s\nRender(...): -want, +got:\n%s", tc.reason, diff)
+			}
+		})
+	}
+}
+
+func TestLocalRenderEnginePassesArgs(t *testing.T) {
+	cases := map[string]struct {
+		reason string
+		args   []string
+	}{
+		"None": {
+			reason: "With no extra arguments the binary should be run as plain `internal render`, which every Crossplane supports.",
+		},
+		"Ordering": {
+			reason: "Extra arguments should follow `internal render`, so a flag like --enable-composed-resource-ordering reaches the render command.",
+			args:   []string{"--enable-composed-resource-ordering"},
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(envHelperMode, "echo-args")
+			t.Setenv(envHelperArgs, strings.Join(tc.args, " "))
+
+			f := &EngineFlags{CrossplaneBinary: os.Args[0]}
+			f.AddRenderArgs(tc.args...)
+			e := NewEngineFromFlags(f, logging.NewNopLogger())
+
+			if _, err := e.Render(context.Background(), &renderv1alpha1.RenderRequest{}); err != nil {
+				t.Errorf("\n%s\nRender(...): %v", tc.reason, err)
 			}
 		})
 	}

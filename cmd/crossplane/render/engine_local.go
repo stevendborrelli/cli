@@ -34,6 +34,9 @@ import (
 type localRenderEngine struct {
 	// BinaryPath is the path to the crossplane binary.
 	BinaryPath string
+
+	// Args are extra arguments for crossplane internal render.
+	Args []string
 }
 
 func (e *localRenderEngine) CheckContextSupport() error {
@@ -63,7 +66,7 @@ func (e *localRenderEngine) Render(ctx context.Context, req *renderv1alpha1.Rend
 
 	var stderr bytes.Buffer
 
-	cmd := exec.CommandContext(ctx, e.BinaryPath, "internal", "render") //nolint:gosec // The binary path is user-supplied via CLI flag.
+	cmd := exec.CommandContext(ctx, e.BinaryPath, append([]string{"internal", "render"}, e.Args...)...) //nolint:gosec // The binary path is user-supplied via CLI flag.
 	cmd.Stdin = bytes.NewReader(data)
 	cmd.Stderr = &stderr
 

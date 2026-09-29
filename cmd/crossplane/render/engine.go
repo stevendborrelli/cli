@@ -72,6 +72,19 @@ type EngineFlags struct {
 	CrossplaneImage         string `help:"Override the full Crossplane Docker image reference for rendering."                           placeholder:"IMAGE"     xor:"crossplane-selector"`
 	CrossplaneBinary        string `help:"Path to a local crossplane binary to use instead of Docker."                                  placeholder:"PATH"      type:"existingfile"       xor:"crossplane-selector,crossplane-docker"`
 	CrossplaneDockerNetwork string `help:"The docker network to start the crossplane container in"                                      xor:"crossplane-docker"`
+
+	// RenderArgs are extra arguments for crossplane internal render, which a
+	// command adds with AddRenderArgs. They aren't flags of their own: a
+	// command decides which of its flags become arguments.
+	RenderArgs []string `kong:"-"`
+}
+
+// AddRenderArgs adds arguments to pass to crossplane internal render.
+//
+// Only pass what the Crossplane rendering supports. A flag it doesn't know
+// fails the render, so a command should add one only when asked to.
+func (f *EngineFlags) AddRenderArgs(args ...string) {
+	f.RenderArgs = append(f.RenderArgs, args...)
 }
 
 // NewEngineFromFlags creates an Engine from the flag configuration. If a binary
@@ -79,10 +92,10 @@ type EngineFlags struct {
 // using the resolved image reference.
 func NewEngineFromFlags(f *EngineFlags, log logging.Logger) Engine {
 	if f.CrossplaneBinary != "" {
-		return &localRenderEngine{BinaryPath: f.CrossplaneBinary}
+		return &localRenderEngine{BinaryPath: f.CrossplaneBinary, Args: f.RenderArgs}
 	}
 
-	return &dockerRenderEngine{image: crossplaneImageFromFlags(f), network: f.CrossplaneDockerNetwork, log: log}
+	return &dockerRenderEngine{image: crossplaneImageFromFlags(f), network: f.CrossplaneDockerNetwork, args: f.RenderArgs, log: log}
 }
 
 func crossplaneImageFromFlags(f *EngineFlags) string {

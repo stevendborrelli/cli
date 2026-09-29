@@ -87,6 +87,8 @@ type Cmd struct {
 	FunctionCredentials    string            `help:"A YAML file or directory of YAML files specifying credentials to use for Functions to render the XR."                                                           placeholder:"PATH"      predictor:"yaml_file_or_directory" type:"path"`
 	FunctionAnnotations    []string          `help:"Override function annotations for all functions. Provide multiple annotations by repeating the argument."                                                       placeholder:"KEY=VALUE" short:"a"`
 
+	EnableComposedResourceOrdering bool `group:"Alpha Features:" help:"Render as Crossplane does with composed resource ordering enabled: functions are told dependencies are supported, and the ones they declare hold resources back. Needs a Crossplane that supports it."`
+
 	CacheDir       string        `env:"CROSSPLANE_XPKG_CACHE"                                                                                      help:"Directory for cached xpkg package contents."          name:"cache-dir"`
 	MaxConcurrency uint          `default:"8"                                                                                                      help:"Maximum concurrency for building embedded functions."`
 	ProjectFile    string        `help:"Path to the project file or package metadata file (crossplane.yaml). Autodetects the file type."           optional:""                                                 predictor:"yaml_file" short:"f"           type:"path"`
@@ -230,6 +232,10 @@ func (c *Cmd) Run(k *kong.Context, log logging.Logger, sp terminal.SpinnerPrinte
 	}
 
 	c.SetDefaultCrossplaneDockerNetwork(fns)
+
+	if c.EnableComposedResourceOrdering {
+		c.AddRenderArgs("--enable-composed-resource-ordering")
+	}
 
 	engine := c.newEngine(&c.EngineFlags, log)
 
